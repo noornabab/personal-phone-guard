@@ -32,6 +32,12 @@
 
         </activity>
 
+        <service
+            android:name=".RecordingService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="camera|microphone" />
+
     </application>
 
 </manifest>
