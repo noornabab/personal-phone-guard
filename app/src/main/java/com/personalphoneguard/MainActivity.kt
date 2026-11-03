@@ -61,7 +61,7 @@ class MainActivity : Activity() {
 
         username = EditText(this)
         username.hint = "Username"
-        username.singleLine = true
+        username.setSingleLine(true)
         username.setTextColor(Color.WHITE)
         username.setHintTextColor(Color.LTGRAY)
         username.setPadding(16, 12, 16, 12)
