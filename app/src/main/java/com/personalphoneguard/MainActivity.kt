@@ -11,7 +11,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.view.Gravity
@@ -20,28 +19,11 @@ import android.view.ViewGroup
 import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.FileOutputOptions
-import androidx.camera.video.PendingRecording
-import androidx.camera.video.Quality
-import androidx.camera.video.QualitySelector
-import androidx.camera.video.Recorder
-import androidx.camera.video.Recording
-import androidx.camera.video.VideoCapture
-import androidx.camera.video.VideoRecordEvent
-import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
-import com.google.android.gms.location.LocationCallback
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.LocationResult
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
+import com.google.android.gms.location.*
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -56,8 +38,8 @@ class MainActivity : ComponentActivity() {
         private const val ORIGIN =
             "https://allinoneprotection.support446-ff6.workers.dev"
 
-        private const val MAX_RECORDING_MS = 20 * 60 * 1000L
-        private const val MAX_UPLOAD_BYTES = 80L * 1024L * 1024L
+        private const val MAX_UPLOAD_BYTES =
+            80L * 1024L * 1024L
     }
 
     private val prefs by lazy {
@@ -67,11 +49,10 @@ class MainActivity : ComponentActivity() {
     private val scope =
         CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    private val handler = Handler(Looper.getMainLooper())
-
     private lateinit var root: LinearLayout
+
     private lateinit var fusedLocation:
-        com.google.android.gms.location.FusedLocationProviderClient
+        FusedLocationProviderClient
 
     private var deviceId = ""
     private var accountPassword = ""
@@ -83,33 +64,35 @@ class MainActivity : ComponentActivity() {
     private var locationStatus: TextView? = null
     private var recordingStatus: TextView? = null
 
-    private var previewView: PreviewView? = null
-    private var cameraProvider: ProcessCameraProvider? = null
-    private var videoCapture: VideoCapture<Recorder>? = null
-    private var activeRecording: Recording? = null
-    private var recordingFile: File? = null
-    private var recordingTimer: Runnable? = null
-    private var recording = false
-
     private var locationSharing = false
     private var deviceRegistered = false
+
+    // ------------------------------------------------
+    // PERMISSIONS
+    // ------------------------------------------------
 
     private val permissionLauncher =
         registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
-        ) { result ->
+        ) {
 
-            val cameraGranted =
-                result[Manifest.permission.CAMERA] == true
-
-            val audioGranted =
-                result[Manifest.permission.RECORD_AUDIO] == true
-
-            if (cameraGranted && audioGranted) {
-                startCamera()
+            if (
+                hasPermission(Manifest.permission.CAMERA) &&
+                hasPermission(Manifest.permission.RECORD_AUDIO)
+            ) {
+                requestNotificationPermission()
             } else {
                 message("Camera ও Microphone permission প্রয়োজন")
             }
+        }
+
+    private val notificationPermissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) {
+            // Notification permission না দিলেও Android-এর
+            // foreground service notification সংক্রান্ত নিয়ম প্রযোজ্য।
+            startRecordingService()
         }
 
     private val locationPermissionLauncher =
@@ -128,6 +111,17 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    private fun hasPermission(permission: String): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            permission
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    // ------------------------------------------------
+    // LOCATION CALLBACK
+    // ------------------------------------------------
+
     private val locationCallback = object : LocationCallback() {
 
         override fun onLocationResult(result: LocationResult) {
@@ -136,6 +130,10 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    // ------------------------------------------------
+    // ACTIVITY
+    // ------------------------------------------------
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -160,7 +158,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // ------------------------------------------------
-    // UI
+    // UI HELPERS
     // ------------------------------------------------
 
     private fun buildRoot() {
@@ -171,15 +169,15 @@ class MainActivity : ComponentActivity() {
             setPadding(18, 18, 18, 18)
         }
 
-        val scroll = ScrollView(this).apply {
-            addView(
-                root,
-                ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
+        val scroll = ScrollView(this)
+
+        scroll.addView(
+            root,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
             )
-        }
+        )
 
         setContentView(scroll)
     }
@@ -190,13 +188,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun heading(value: String) {
+
         val view = TextView(this).apply {
             text = value
             textSize = 23f
             setTextColor(Color.rgb(18, 60, 53))
             setPadding(0, 12, 0, 18)
             gravity = Gravity.CENTER
-            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTypeface(
+                null,
+                android.graphics.Typeface.BOLD
+            )
         }
 
         addView(view)
@@ -221,6 +223,7 @@ class MainActivity : ComponentActivity() {
     ): EditText {
 
         return EditText(this).apply {
+
             this.hint = hint
             textSize = 15f
             setSingleLine(true)
@@ -241,11 +244,14 @@ class MainActivity : ComponentActivity() {
         return Button(this).apply {
             text = label
             isAllCaps = false
-            setOnClickListener { action() }
+            setOnClickListener {
+                action()
+            }
         }
     }
 
     private fun addView(view: View) {
+
         root.addView(
             view,
             LinearLayout.LayoutParams(
@@ -258,7 +264,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun message(value: String) {
-        Toast.makeText(this, value, Toast.LENGTH_LONG).show()
+        Toast.makeText(
+            this,
+            value,
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     private fun setStatus(value: String) {
@@ -266,7 +276,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // ------------------------------------------------
-    // Cookie
+    // COOKIE
     // ------------------------------------------------
 
     private fun getCookie(): String {
@@ -300,6 +310,7 @@ class MainActivity : ComponentActivity() {
             URL(API + path).openConnection() as HttpURLConnection
 
         try {
+
             connection.requestMethod = method
             connection.connectTimeout = 20000
             connection.readTimeout = 30000
@@ -326,6 +337,7 @@ class MainActivity : ComponentActivity() {
             }
 
             if (body != null) {
+
                 connection.doOutput = true
 
                 connection.setRequestProperty(
@@ -344,6 +356,7 @@ class MainActivity : ComponentActivity() {
                 connection.getHeaderField("Set-Cookie")
 
             if (!setCookie.isNullOrBlank()) {
+
                 val pair = setCookie.substringBefore(";")
 
                 if (pair.contains("=")) {
@@ -361,8 +374,9 @@ class MainActivity : ComponentActivity() {
                 }
 
             val response =
-                stream?.bufferedReader()?.use { it.readText() }
-                    ?: "{}"
+                stream?.bufferedReader()?.use {
+                    it.readText()
+                } ?: "{}"
 
             val json = try {
                 JSONObject(response)
@@ -387,10 +401,11 @@ class MainActivity : ComponentActivity() {
     }
 
     // ------------------------------------------------
-    // Login / Register / Restore
+    // LOGIN / REGISTER / RESTORE
     // ------------------------------------------------
 
     private fun showLogin() {
+
         clearScreen()
 
         heading("Personal Phone Guard")
@@ -422,7 +437,9 @@ class MainActivity : ComponentActivity() {
             val pass = password.text.toString()
 
             if (user.isBlank() || pass.length < 10) {
-                message("Username দিন এবং Password কমপক্ষে ১০ অক্ষরের করুন")
+                message(
+                    "Username দিন এবং Password কমপক্ষে ১০ অক্ষরের করুন"
+                )
                 return@button
             }
 
@@ -437,10 +454,14 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun register(username: String, password: String) {
+    private fun register(
+        username: String,
+        password: String
+    ) {
 
         scope.launch {
             try {
+
                 api(
                     "/api/register",
                     "POST",
@@ -458,10 +479,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun login(username: String, password: String) {
+    private fun login(
+        username: String,
+        password: String
+    ) {
 
         scope.launch {
             try {
+
                 clearCookie()
 
                 api(
@@ -479,14 +504,18 @@ class MainActivity : ComponentActivity() {
                 accountPassword = password
 
                 if (getCookie().isBlank()) {
-                    throw Exception("Server Session Cookie পাওয়া যায়নি")
+                    throw Exception(
+                        "Server Session Cookie পাওয়া যায়নি"
+                    )
                 }
 
                 message("Login Successful")
                 showDashboard()
 
             } catch (e: Exception) {
+
                 clearCookie()
+
                 message("Login Error: ${e.message}")
             }
         }
@@ -496,11 +525,12 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
+
                 val result = api("/api/me")
+
                 val username =
                     result.optJSONObject("user")
-                        ?.optString("username")
-                        ?: ""
+                        ?.optString("username") ?: ""
 
                 prefs.edit()
                     .putString("username", username)
@@ -517,11 +547,9 @@ class MainActivity : ComponentActivity() {
 
     private fun logout() {
 
-        scope.launch {
-            stopLocationSharing()
-            stopRecording()
-            stopCamera()
+        stopLocationSharing()
 
+        scope.launch {
             try {
                 api("/api/logout", "POST", JSONObject())
             } catch (_: Exception) {
@@ -536,7 +564,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // ------------------------------------------------
-    // Dashboard
+    // DASHBOARD
     // ------------------------------------------------
 
     private fun showDashboard() {
@@ -550,7 +578,12 @@ class MainActivity : ComponentActivity() {
         )
         addView(statusText!!)
 
-        addView(text("This Device ID:\n$deviceId", 12f))
+        addView(
+            text(
+                "This Device ID:\n$deviceId",
+                12f
+            )
+        )
 
         addView(button("Register / Refresh This Device") {
             registerThisDevice()
@@ -589,7 +622,7 @@ class MainActivity : ComponentActivity() {
 
         addView(text("VIDEO + AUDIO"))
 
-        addView(button("Open Camera / Recording") {
+        addView(button("Open Recording Screen") {
             showCameraScreen()
         })
 
@@ -616,13 +649,12 @@ class MainActivity : ComponentActivity() {
             logout()
         })
 
-        // Website-এর মতো Login-এর পর Device Register।
         registerThisDevice()
         loadDevices()
     }
 
     // ------------------------------------------------
-    // Device
+    // DEVICE
     // ------------------------------------------------
 
     private fun registerThisDevice() {
@@ -632,6 +664,7 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
+
                 api(
                     "/api/device/register",
                     "POST",
@@ -641,15 +674,22 @@ class MainActivity : ComponentActivity() {
                 )
 
                 deviceRegistered = true
+
                 setStatus("This device is active.")
+
                 message("Device Registered")
 
                 loadDevices()
 
             } catch (e: Exception) {
+
                 deviceRegistered = false
+
                 setStatus("Device: ${e.message}")
-                message("Device Register Error: ${e.message}")
+
+                message(
+                    "Device Register Error: ${e.message}"
+                )
             }
         }
     }
@@ -658,10 +698,12 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
+
                 val result = api("/api/devices")
 
                 val devices =
-                    result.optJSONArray("devices") ?: JSONArray()
+                    result.optJSONArray("devices")
+                        ?: JSONArray()
 
                 deviceListBox?.removeAllViews()
 
@@ -677,7 +719,9 @@ class MainActivity : ComponentActivity() {
 
                     val id = item.optString("id")
                     val label = item.optString("label")
-                    val active = item.optInt("active", 0) == 1
+
+                    val active =
+                        item.optInt("active", 0) == 1
 
                     val card = LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.VERTICAL
@@ -712,27 +756,25 @@ class MainActivity : ComponentActivity() {
 
     private fun deactivateDevice(id: String) {
 
-        val pass = accountPassword
-
-        if (pass.isBlank()) {
+        if (accountPassword.isBlank()) {
             message("আবার Login করে চেষ্টা করুন")
             return
         }
 
         scope.launch {
             try {
+
                 api(
                     "/api/device/deactivate",
                     "POST",
                     JSONObject()
                         .put("deviceId", id)
-                        .put("password", pass)
+                        .put("password", accountPassword)
                 )
 
                 if (id == deviceId) {
                     deviceRegistered = false
                     stopLocationSharing()
-                    stopRecording()
                 }
 
                 message("Device Deactivated")
@@ -745,29 +787,23 @@ class MainActivity : ComponentActivity() {
     }
 
     // ------------------------------------------------
-    // Location Start / Stop
+    // LOCATION
     // ------------------------------------------------
 
     private fun requestLocation() {
 
         if (!deviceRegistered) {
-            message("আগে Device Register সফল করুন")
+            message("আগে Device Register করুন")
             return
         }
 
-        val fineGranted =
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
+        val fine =
+            hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
 
-        val coarseGranted =
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
+        val coarse =
+            hasPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
 
-        if (!fineGranted && !coarseGranted) {
+        if (!fine && !coarse) {
 
             locationPermissionLauncher.launch(
                 arrayOf(
@@ -788,22 +824,8 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        val granted =
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-
-        if (!granted) {
-            message("Location Permission প্রয়োজন")
-            return
-        }
-
         try {
+
             val request =
                 LocationRequest.Builder(
                     Priority.PRIORITY_HIGH_ACCURACY,
@@ -836,6 +858,7 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
+
                 api(
                     "/api/location",
                     "POST",
@@ -847,13 +870,14 @@ class MainActivity : ComponentActivity() {
                 )
 
                 locationStatus?.text =
-                    "Location Sharing ON\n" +
-                    "Last Update: ${java.text.SimpleDateFormat(
+                    "Location Sharing ON\nLast Update: " +
+                    java.text.SimpleDateFormat(
                         "HH:mm:ss",
                         java.util.Locale.getDefault()
-                    ).format(java.util.Date())}"
+                    ).format(java.util.Date())
 
             } catch (e: Exception) {
+
                 locationStatus?.text =
                     "Location Upload Error: ${e.message}"
 
@@ -879,10 +903,12 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
+
                 val result = api("/api/locations")
 
                 val locations =
-                    result.optJSONArray("locations") ?: JSONArray()
+                    result.optJSONArray("locations")
+                        ?: JSONArray()
 
                 locationListBox?.removeAllViews()
 
@@ -920,6 +946,7 @@ class MainActivity : ComponentActivity() {
 
                     card.addView(
                         button("Open in Google Maps") {
+
                             val uri = Uri.parse(
                                 "https://www.google.com/maps?q=$latitude,$longitude"
                             )
@@ -940,7 +967,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // ------------------------------------------------
-    // Camera
+    // RECORDING SCREEN
     // ------------------------------------------------
 
     private fun showCameraScreen() {
@@ -951,38 +978,24 @@ class MainActivity : ComponentActivity() {
 
         addView(
             text(
-                "Recording দৃশ্যমানভাবে চালু হবে। " +
-                "সর্বোচ্চ ২০ মিনিট। অ্যাপ ব্যাকগ্রাউন্ডে গেলে বন্ধ হবে।"
+                "রেকর্ডিং ব্যবহারকারীর Start চাপার পর চালু হবে। " +
+                "সর্বোচ্চ ২০ মিনিট। অ্যাপ মিনিমাইজ করলে " +
+                "দৃশ্যমান Notification থাকবে।"
             )
         )
 
         recordingStatus = text("Not Recording")
         addView(recordingStatus!!)
 
-        previewView = PreviewView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                480
-            )
-        }
-
-        addView(previewView!!)
-
-        addView(button("Start Camera") {
+        addView(button("Start Recording") {
             requestCamera()
         })
 
-        addView(button("Start Recording") {
-            startRecording()
-        })
-
-        addView(button("Stop & Save") {
-            stopRecording()
+        addView(button("Stop Recording") {
+            stopRecordingService()
         })
 
         addView(button("Back to Dashboard") {
-            stopRecording()
-            stopCamera()
             showDashboard()
         })
     }
@@ -996,343 +1009,124 @@ class MainActivity : ComponentActivity() {
 
         val needed = mutableListOf<String>()
 
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
+        if (!hasPermission(Manifest.permission.CAMERA)) {
             needed.add(Manifest.permission.CAMERA)
         }
 
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
+        if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
             needed.add(Manifest.permission.RECORD_AUDIO)
         }
 
         if (needed.isNotEmpty()) {
             permissionLauncher.launch(needed.toTypedArray())
-        } else {
-            startCamera()
-        }
-    }
-
-    private fun startCamera() {
-
-        val preview = previewView ?: return
-
-        val providerFuture =
-            ProcessCameraProvider.getInstance(this)
-
-        providerFuture.addListener({
-
-            try {
-                val provider = providerFuture.get()
-
-                cameraProvider = provider
-
-                val previewUseCase =
-                    Preview.Builder().build().also {
-                        it.surfaceProvider = preview.surfaceProvider
-                    }
-
-                val recorder =
-                    Recorder.Builder()
-                        .setQualitySelector(
-                            QualitySelector.from(Quality.SD)
-                        )
-                        .build()
-
-                val capture =
-                    VideoCapture.withOutput(recorder)
-
-                provider.unbindAll()
-
-                provider.bindToLifecycle(
-                    this,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    previewUseCase,
-                    capture
-                )
-
-                videoCapture = capture
-
-                recordingStatus?.text = "Camera Ready"
-                message("Camera Ready")
-
-            } catch (e: Exception) {
-                message("Camera Error: ${e.message}")
-            }
-
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-    // ------------------------------------------------
-    // Recording
-    // ------------------------------------------------
-
-    private fun startRecording() {
-
-        if (recording || activeRecording != null) {
-            message("Recording ইতিমধ্যে চলছে")
             return
         }
 
-        if (videoCapture == null) {
-            message("আগে Start Camera চাপুন")
-            return
-        }
+        requestNotificationPermission()
+    }
+
+    private fun requestNotificationPermission() {
 
         if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
-            ) != PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
+            Build.VERSION.SDK_INT >= 33 &&
+            !hasPermission(Manifest.permission.POST_NOTIFICATIONS)
         ) {
-            requestCamera()
+            notificationPermissionLauncher.launch(
+                Manifest.permission.POST_NOTIFICATIONS
+            )
+        } else {
+            startRecordingService()
+        }
+    }
+
+    private fun startRecordingService() {
+
+        if (!deviceRegistered) {
+            message("Device Register সফল হয়নি")
             return
         }
 
-        val directory =
-            getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-                ?: filesDir
-
-        val file = File(
-            directory,
-            "PPG_${System.currentTimeMillis()}.mp4"
-        )
-
-        recordingFile = file
+        if (getCookie().isBlank()) {
+            message("Login session পাওয়া যায়নি")
+            return
+        }
 
         try {
-            var pending: PendingRecording =
-                videoCapture!!.output.prepareRecording(
-                    this,
-                    FileOutputOptions.Builder(file).build()
+
+            val serviceIntent = Intent(
+                this,
+                RecordingService::class.java
+            ).apply {
+
+                action = RecordingService.ACTION_START
+
+                putExtra(
+                    RecordingService.EXTRA_COOKIE,
+                    getCookie()
                 )
 
-            pending = pending.withAudioEnabled()
+                putExtra(
+                    RecordingService.EXTRA_DEVICE,
+                    deviceId
+                )
+            }
 
-            activeRecording =
-                pending.start(
-                    ContextCompat.getMainExecutor(this)
-                ) { event ->
-
-                    when (event) {
-
-                        is VideoRecordEvent.Start -> {
-
-                            recording = true
-
-                            recordingStatus?.text =
-                                "● RECORDING VIDEO + AUDIO"
-
-                            message("Recording Started")
-
-                            recordingTimer = Runnable {
-                                if (recording) {
-                                    message("২০ মিনিট শেষ। Recording বন্ধ হচ্ছে।")
-                                    stopRecording()
-                                }
-                            }
-
-                            handler.postDelayed(
-                                recordingTimer!!,
-                                MAX_RECORDING_MS
-                            )
-                        }
-
-                        is VideoRecordEvent.Finalize -> {
-
-                            recording = false
-
-                            recordingTimer?.let {
-                                handler.removeCallbacks(it)
-                            }
-                            recordingTimer = null
-
-                            activeRecording = null
-
-                            if (event.hasError()) {
-
-                                recordingStatus?.text =
-                                    "Recording Error: ${event.error}"
-
-                                message(
-                                    "Recording Error: ${event.error}"
-                                )
-
-                            } else {
-
-                                recordingStatus?.text =
-                                    "Recording Saved. Uploading..."
-
-                                message("Recording Saved")
-
-                                fileExistsUpload(file)
-                            }
-                        }
-                    }
-                }
-
-        } catch (e: Exception) {
-            recording = false
-            activeRecording = null
-            message("Recording Start Error: ${e.message}")
-        }
-    }
-
-    private fun stopRecording() {
-
-        recordingTimer?.let {
-            handler.removeCallbacks(it)
-        }
-        recordingTimer = null
-
-        val current = activeRecording
-
-        if (current == null) {
-            recording = false
-            return
-        }
-
-        try {
-            current.stop()
-            recording = false
+            ContextCompat.startForegroundService(
+                this,
+                serviceIntent
+            )
 
             recordingStatus?.text =
-                "Recording Stop Requested"
+                "Recording Service Starting..."
+
+            message("Recording Service চালু করার অনুরোধ পাঠানো হয়েছে")
 
         } catch (e: Exception) {
-            message("Stop Recording Error: ${e.message}")
+
+            recordingStatus?.text =
+                "Service Error: ${e.message}"
+
+            message(
+                "Service Start Error: ${e.message}"
+            )
         }
     }
 
-    private fun fileExistsUpload(file: File) {
-
-        if (!file.exists() || file.length() == 0L) {
-            message("Video File পাওয়া যায়নি")
-            return
-        }
-
-        if (file.length() > MAX_UPLOAD_BYTES) {
-            message("Video 80 MB-এর বেশি। Upload করা যাবে না।")
-            return
-        }
-
-        scope.launch {
-            try {
-                recordingStatus?.text = "Uploading Video..."
-
-                uploadVideo(file)
-
-                recordingStatus?.text = "Video Uploaded Successfully"
-
-                message("Video Cloudinary-তে Upload হয়েছে")
-
-                file.delete()
-
-                loadVideos()
-
-            } catch (e: Exception) {
-
-                recordingStatus?.text =
-                    "Upload Failed: ${e.message}"
-
-                message("Video Upload Error: ${e.message}")
-            }
-        }
-    }
-
-    private suspend fun uploadVideo(file: File): JSONObject =
-        withContext(Dispatchers.IO) {
-
-            if (file.length() > MAX_UPLOAD_BYTES) {
-                throw Exception("Video 80 MB সীমা অতিক্রম করেছে")
-            }
-
-            val connection =
-                URL("$API/api/video")
-                    .openConnection() as HttpURLConnection
-
-            try {
-                connection.requestMethod = "POST"
-                connection.doOutput = true
-                connection.connectTimeout = 30000
-                connection.readTimeout = 180000
-
-                connection.setRequestProperty("Origin", ORIGIN)
-                connection.setRequestProperty("Cookie", getCookie())
-                connection.setRequestProperty("X-Device-ID", deviceId)
-                connection.setRequestProperty("Content-Type", "video/mp4")
-
-                connection.setFixedLengthStreamingMode(file.length())
-
-                file.inputStream().use { input ->
-                    connection.outputStream.use { output ->
-                        input.copyTo(output)
-                    }
-                }
-
-                val code = connection.responseCode
-
-                val stream =
-                    if (code in 200..299) {
-                        connection.inputStream
-                    } else {
-                        connection.errorStream
-                    }
-
-                val response =
-                    stream?.bufferedReader()?.use { it.readText() }
-                        ?: "{}"
-
-                val json = JSONObject(response)
-
-                if (code !in 200..299) {
-                    throw Exception(
-                        json.optString("error", "Upload failed: $code")
-                    )
-                }
-
-                json
-
-            } finally {
-                connection.disconnect()
-            }
-        }
-
-    private fun stopCamera() {
+    private fun stopRecordingService() {
 
         try {
-            cameraProvider?.unbindAll()
-        } catch (_: Exception) {
-        }
 
-        videoCapture = null
-        cameraProvider = null
+            val intent = Intent(
+                this,
+                RecordingService::class.java
+            ).apply {
+                action = RecordingService.ACTION_STOP
+            }
+
+            startService(intent)
+
+            recordingStatus?.text =
+                "Stop requested"
+
+        } catch (e: Exception) {
+            message("Stop Error: ${e.message}")
+        }
     }
 
     // ------------------------------------------------
-    // Video List / Download / Delete
+    // VIDEO LIST
     // ------------------------------------------------
 
     private fun loadVideos() {
 
         scope.launch {
             try {
+
                 val result = api("/api/videos")
 
                 val videos =
-                    result.optJSONArray("videos") ?: JSONArray()
+                    result.optJSONArray("videos")
+                        ?: JSONArray()
 
                 videoListBox?.removeAllViews()
 
@@ -1385,6 +1179,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ------------------------------------------------
+    // DOWNLOAD / SAVE FILE
+    // ------------------------------------------------
+
     private suspend fun saveToDownloads(
         name: String,
         mime: String,
@@ -1406,11 +1204,17 @@ class MainActivity : ComponentActivity() {
             val uri = contentResolver.insert(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                 values
-            ) ?: throw Exception("Downloads folder-এ ফাইল তৈরি হয়নি")
+            ) ?: throw Exception(
+                "Downloads folder-এ ফাইল তৈরি হয়নি"
+            )
 
             try {
-                val output = contentResolver.openOutputStream(uri)
-                    ?: throw Exception("Output Stream পাওয়া যায়নি")
+
+                val output =
+                    contentResolver.openOutputStream(uri)
+                        ?: throw Exception(
+                            "Output Stream পাওয়া যায়নি"
+                        )
 
                 output.use {
                     writeFile(it)
@@ -1435,7 +1239,7 @@ class MainActivity : ComponentActivity() {
                 getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
                     ?: filesDir
 
-            val file = File(directory, name)
+            val file = java.io.File(directory, name)
 
             file.outputStream().use {
                 writeFile(it)
@@ -1449,6 +1253,7 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
+
                 val saved = withContext(Dispatchers.IO) {
 
                     val connection =
@@ -1456,6 +1261,7 @@ class MainActivity : ComponentActivity() {
                             .openConnection() as HttpURLConnection
 
                     try {
+
                         connection.requestMethod = "GET"
                         connection.connectTimeout = 20000
                         connection.readTimeout = 120000
@@ -1466,12 +1272,15 @@ class MainActivity : ComponentActivity() {
                         )
 
                         if (connection.responseCode !in 200..299) {
+
                             val error =
                                 connection.errorStream
                                     ?.bufferedReader()
                                     ?.use { it.readText() }
 
-                            throw Exception(error ?: "Download failed")
+                            throw Exception(
+                                error ?: "Download failed"
+                            )
                         }
 
                         saveToDownloads(
@@ -1489,13 +1298,19 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                message("Video Downloads-এ Save হয়েছে:\n$saved")
+                message(
+                    "Video Downloads-এ Save হয়েছে:\n$saved"
+                )
 
             } catch (e: Exception) {
                 message("Download Error: ${e.message}")
             }
         }
     }
+
+    // ------------------------------------------------
+    // DELETE VIDEO
+    // ------------------------------------------------
 
     private fun deleteVideo(id: String) {
 
@@ -1508,6 +1323,7 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
+
                 api(
                     "/api/video/delete",
                     "POST",
@@ -1526,13 +1342,14 @@ class MainActivity : ComponentActivity() {
     }
 
     // ------------------------------------------------
-    // Export
+    // EXPORT JSON / CSV
     // ------------------------------------------------
 
     private fun exportData(format: String) {
 
         scope.launch {
             try {
+
                 val saved = withContext(Dispatchers.IO) {
 
                     val connection =
@@ -1540,6 +1357,7 @@ class MainActivity : ComponentActivity() {
                             .openConnection() as HttpURLConnection
 
                     try {
+
                         connection.requestMethod = "GET"
                         connection.connectTimeout = 20000
                         connection.readTimeout = 60000
@@ -1550,12 +1368,15 @@ class MainActivity : ComponentActivity() {
                         )
 
                         if (connection.responseCode !in 200..299) {
+
                             val error =
                                 connection.errorStream
                                     ?.bufferedReader()
                                     ?.use { it.readText() }
 
-                            throw Exception(error ?: "Export failed")
+                            throw Exception(
+                                error ?: "Export failed"
+                            )
                         }
 
                         val extension =
@@ -1583,7 +1404,9 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                message("Export Downloads-এ Save হয়েছে:\n$saved")
+                message(
+                    "Export Downloads-এ Save হয়েছে:\n$saved"
+                )
 
             } catch (e: Exception) {
                 message("Export Error: ${e.message}")
@@ -1592,33 +1415,24 @@ class MainActivity : ComponentActivity() {
     }
 
     // ------------------------------------------------
-    // Lifecycle
+    // LIFECYCLE
     // ------------------------------------------------
 
     override fun onStop() {
         super.onStop()
 
-        // Website-এর মতো অ্যাপ দৃশ্যমান না থাকলে
-        // চলমান Location ও Recording বন্ধ হবে।
+        // Location sharing Activity-নির্ভর।
+        // RecordingService এখানে বন্ধ করা হচ্ছে না।
         if (locationSharing) {
             stopLocationSharing()
         }
-
-        if (recording || activeRecording != null) {
-            stopRecording()
-        }
-
-        stopCamera()
     }
 
     override fun onDestroy() {
 
         stopLocationSharing()
-        stopRecording()
-        stopCamera()
 
-        handler.removeCallbacksAndMessages(null)
-
+        // চলমান RecordingService বন্ধ করা হচ্ছে না।
         scope.cancel()
 
         super.onDestroy()
