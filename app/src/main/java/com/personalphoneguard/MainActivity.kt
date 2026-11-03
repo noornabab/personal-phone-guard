@@ -50,10 +50,10 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val API =
-            "https://allinoneprotection.support446-ff6.workers.dev/"
+            "https://allinoneprotection.support446-ff6.workers.dev"
 
         private const val ORIGIN =
-            "https://allinoneprotection.support446-ff6.workers.dev/"
+            "https://allinoneprotection.support446-ff6.workers.dev"
 
         private const val MAX_RECORDING_MS = 20 * 60 * 1000L
         private const val MAX_UPLOAD_BYTES = 80L * 1024L * 1024L
