@@ -1,6 +1,7 @@
 
 package com.personalphoneguard
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.os.Bundle
@@ -13,6 +14,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.view.Gravity
 import android.widget.*
 import android.text.InputType
@@ -38,9 +42,15 @@ class MainActivity : Activity() {
     private val white = Color.WHITE
 
     private lateinit var main: LinearLayout
+
     private var ownerToken = ""
     private var deviceToken = ""
     private var pendingCommandId = ""
+
+    private var locationManager: LocationManager? = null
+    private var locationListener: LocationListener? = null
+    private var locationTimeout: Runnable? = null
+    private var locationRequestActive = false
 
     private val pollRunnable = object : Runnable {
         override fun run() {
@@ -72,6 +82,11 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(pollRunnable)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopLocationUpdates()
     }
 
     // ---------------- UI HELPERS ----------------
@@ -340,7 +355,6 @@ class MainActivity : Activity() {
         }
 
         createScreen("OWNER DASHBOARD")
-
         addText("Loading devices...", 15f, green)
 
         runNetwork({
@@ -366,11 +380,7 @@ class MainActivity : Activity() {
     private fun renderDashboard(result: JSONObject) {
         createScreen("OWNER DASHBOARD")
 
-        addText(
-            "Your Registered Devices",
-            17f,
-            green
-        )
+        addText("Your Registered Devices", 17f, green)
 
         val devices = result.optJSONArray("devices")
             ?: JSONArray()
@@ -419,6 +429,14 @@ class MainActivity : Activity() {
                 )
             }
 
+            addButton("VIEW LOCATION HISTORY") {
+                loadLocationHistory(id)
+            }
+
+            addButton("VIEW MEDIA HISTORY") {
+                loadMediaHistory(id)
+            }
+
             addButton("PING DEVICE") {
                 sendOwnerCommand(id, "PING")
             }
@@ -459,6 +477,120 @@ class MainActivity : Activity() {
             prefs.edit().remove("owner_token").apply()
             showHome()
         }
+    }
+
+    // ---------------- LOCATION HISTORY ----------------
+
+    private fun loadLocationHistory(deviceId: String) {
+        runNetwork({
+            val result = apiRequest(
+                "/api/devices/location?device_id=" +
+                    java.net.URLEncoder.encode(
+                        deviceId,
+                        "UTF-8"
+                    ),
+                "GET",
+                null,
+                ownerToken
+            )
+
+            val rows = result.optJSONArray("locations")
+                ?: JSONArray()
+
+            val text = StringBuilder()
+
+            for (i in 0 until rows.length()) {
+                val item = rows.getJSONObject(i)
+
+                text.append("Latitude: ")
+                    .append(item.optDouble("latitude"))
+                    .append("\n")
+
+                text.append("Longitude: ")
+                    .append(item.optDouble("longitude"))
+                    .append("\n")
+
+                text.append("Accuracy: ")
+                    .append(item.optString("accuracy"))
+                    .append(" m\n")
+
+                text.append("Time: ")
+                    .append(item.optString("recorded_at"))
+                    .append("\n\n")
+            }
+
+            runOnUiThread {
+                AlertDialog.Builder(this)
+                    .setTitle("LOCATION HISTORY")
+                    .setMessage(
+                        if (text.isEmpty()) {
+                            "No location records found."
+                        } else {
+                            text.toString()
+                        }
+                    )
+                    .setPositiveButton("CLOSE", null)
+                    .show()
+            }
+
+        }, {
+            showMessage(it)
+        })
+    }
+
+    // ---------------- MEDIA HISTORY ----------------
+
+    private fun loadMediaHistory(deviceId: String) {
+        runNetwork({
+            val result = apiRequest(
+                "/api/devices/media?device_id=" +
+                    java.net.URLEncoder.encode(
+                        deviceId,
+                        "UTF-8"
+                    ),
+                "GET",
+                null,
+                ownerToken
+            )
+
+            val rows = result.optJSONArray("media")
+                ?: JSONArray()
+
+            val text = StringBuilder()
+
+            for (i in 0 until rows.length()) {
+                val item = rows.getJSONObject(i)
+
+                text.append("Type: ")
+                    .append(item.optString("resource_type"))
+                    .append("\n")
+
+                text.append("URL: ")
+                    .append(item.optString("secure_url"))
+                    .append("\n")
+
+                text.append("Time: ")
+                    .append(item.optString("created_at"))
+                    .append("\n\n")
+            }
+
+            runOnUiThread {
+                AlertDialog.Builder(this)
+                    .setTitle("MEDIA HISTORY")
+                    .setMessage(
+                        if (text.isEmpty()) {
+                            "No media records found."
+                        } else {
+                            text.toString()
+                        }
+                    )
+                    .setPositiveButton("CLOSE", null)
+                    .show()
+            }
+
+        }, {
+            showMessage(it)
+        })
     }
 
     // ---------------- PAIRING CODE ----------------
@@ -520,8 +652,7 @@ class MainActivity : Activity() {
 
             runOnUiThread {
                 showMessage(
-                    "Request created.\n" +
-                    "Status: " +
+                    "Request created.\nStatus: " +
                     result.optString("status", "pending")
                 )
                 loadDashboard()
@@ -571,8 +702,9 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("Delete server record?")
             .setMessage(
-                "This permanently deletes the selected device's " +
-                "server record and command history."
+                "This deletes the selected device's server " +
+                "record and related database history. " +
+                "Cloudinary files are not deleted."
             )
             .setView(password)
             .setNegativeButton("CANCEL", null)
@@ -620,17 +752,11 @@ class MainActivity : Activity() {
             for (i in 0 until commands.length()) {
                 val item = commands.getJSONObject(i)
 
-                text.append(
-                    item.optString("command")
-                )
+                text.append(item.optString("command"))
                 text.append(" | ")
-                text.append(
-                    item.optString("status")
-                )
+                text.append(item.optString("status"))
                 text.append("\n")
-                text.append(
-                    item.optString("created_at")
-                )
+                text.append(item.optString("created_at"))
                 text.append("\n\n")
             }
 
@@ -762,6 +888,7 @@ class MainActivity : Activity() {
                     .setNegativeButton("CANCEL", null)
                     .setPositiveButton("UNPAIR") { _, _ ->
                         handler.removeCallbacks(pollRunnable)
+                        stopLocationUpdates()
                         deviceToken = ""
                         prefs.edit()
                             .remove("device_token")
@@ -831,6 +958,7 @@ class MainActivity : Activity() {
         createScreen("PROTECTED DEVICE")
 
         addText("Device: ${deviceName()}", 15f)
+
         addText(
             "Device ID: " +
             (prefs.getString("device_id", "") ?: ""),
@@ -838,14 +966,10 @@ class MainActivity : Activity() {
             Color.LTGRAY
         )
 
-        addText(
-            "Pairing: CONNECTED",
-            16f,
-            green
-        )
+        addText("Pairing: CONNECTED", 16f, green)
 
         addText(
-            "This screen must remain active for command checking. " +
+            "Request checking works while the app is active. " +
             "Android may stop network activity when the app is closed.",
             13f,
             Color.LTGRAY
@@ -861,12 +985,30 @@ class MainActivity : Activity() {
             showMessage("Request checking stopped")
         }
 
+        addText(
+            "LOCATION SHARING\n" +
+            "Your current location will only be sent when you " +
+            "press the button below and grant Android permission.",
+            14f,
+            green
+        )
+
+        addButton("SHARE MY CURRENT LOCATION") {
+            startLocationSharing()
+        }
+
+        addButton("STOP LOCATION REQUEST") {
+            stopLocationUpdates()
+            showMessage("Location request stopped")
+        }
+
         addButton("UNPAIR THIS DEVICE") {
             AlertDialog.Builder(this)
                 .setMessage("Remove saved device access?")
                 .setNegativeButton("CANCEL", null)
                 .setPositiveButton("UNPAIR") { _, _ ->
                     handler.removeCallbacks(pollRunnable)
+                    stopLocationUpdates()
                     deviceToken = ""
                     prefs.edit()
                         .remove("device_token")
@@ -880,6 +1022,211 @@ class MainActivity : Activity() {
         addButton("BACK") {
             showHome()
         }
+    }
+
+    // ---------------- LOCATION SHARING ----------------
+
+    private fun startLocationSharing() {
+        if (deviceToken.isEmpty()) {
+            showMessage("This phone is not paired.")
+            return
+        }
+
+        val fineGranted =
+            checkSelfPermission(
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+
+        val coarseGranted =
+            checkSelfPermission(
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+
+        if (!fineGranted && !coarseGranted) {
+            requestPermissions(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ),
+                2003
+            )
+            return
+        }
+
+        beginLocationRequest()
+    }
+
+    private fun beginLocationRequest() {
+        if (locationRequestActive) {
+            showMessage("Location request is already running.")
+            return
+        }
+
+        val fineGranted =
+            checkSelfPermission(
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+
+        val coarseGranted =
+            checkSelfPermission(
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+
+        if (!fineGranted && !coarseGranted) {
+            showMessage("Location permission is not granted.")
+            return
+        }
+
+        try {
+            locationManager =
+                getSystemService(LOCATION_SERVICE) as LocationManager
+
+            val manager = locationManager
+                ?: throw Exception("Location service unavailable")
+
+            val gpsEnabled =
+                manager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+
+            val networkEnabled =
+                manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+
+            if (!gpsEnabled && !networkEnabled) {
+                showMessage(
+                    "Please turn on Location/GPS from phone settings."
+                )
+                return
+            }
+
+            locationRequestActive = true
+
+            showMessage(
+                "Location request started. Waiting for a GPS fix..."
+            )
+
+            val listener = object : LocationListener {
+
+                override fun onLocationChanged(location: Location) {
+                    stopLocationUpdates()
+                    uploadLocation(location)
+                }
+
+                override fun onProviderEnabled(provider: String) {}
+
+                override fun onProviderDisabled(provider: String) {}
+
+                @Deprecated("Deprecated in Android")
+                override fun onStatusChanged(
+                    provider: String?,
+                    status: Int,
+                    extras: android.os.Bundle?
+                ) {}
+            }
+
+            locationListener = listener
+
+            if (fineGranted && gpsEnabled) {
+                manager.requestLocationUpdates(
+                    LocationManager.GPS_PROVIDER,
+                    1000L,
+                    0f,
+                    listener,
+                    Looper.getMainLooper()
+                )
+            } else if (networkEnabled) {
+                manager.requestLocationUpdates(
+                    LocationManager.NETWORK_PROVIDER,
+                    1000L,
+                    0f,
+                    listener,
+                    Looper.getMainLooper()
+                )
+            } else {
+                throw SecurityException("No permitted location provider")
+            }
+
+            val timeout = Runnable {
+                stopLocationUpdates()
+                showMessage(
+                    "Location not received within 30 seconds. " +
+                    "Check GPS signal and try again."
+                )
+            }
+
+            locationTimeout = timeout
+            handler.postDelayed(timeout, 30000)
+
+        } catch (e: SecurityException) {
+            stopLocationUpdates()
+            showMessage("Location permission is required.")
+        } catch (e: Exception) {
+            stopLocationUpdates()
+            showMessage(
+                e.message ?: "Could not start location request."
+            )
+        }
+    }
+
+    private fun stopLocationUpdates() {
+        locationTimeout?.let {
+            handler.removeCallbacks(it)
+        }
+        locationTimeout = null
+
+        try {
+            val listener = locationListener
+            if (listener != null) {
+                locationManager?.removeUpdates(listener)
+            }
+        } catch (_: Exception) {}
+
+        locationListener = null
+        locationRequestActive = false
+    }
+
+    private fun uploadLocation(location: Location) {
+        val body = JSONObject()
+            .put("latitude", location.latitude)
+            .put("longitude", location.longitude)
+            .put(
+                "accuracy",
+                if (location.hasAccuracy()) {
+                    location.accuracy.toDouble()
+                } else {
+                    JSONObject.NULL
+                }
+            )
+
+        runNetwork({
+            val result = apiRequest(
+                "/api/device/location",
+                "POST",
+                body,
+                deviceToken
+            )
+
+            runOnUiThread {
+                AlertDialog.Builder(this)
+                    .setTitle("LOCATION SHARED")
+                    .setMessage(
+                        "Location was sent successfully.\n\n" +
+                        "Latitude: ${location.latitude}\n" +
+                        "Longitude: ${location.longitude}\n" +
+                        "Accuracy: " +
+                        if (location.hasAccuracy()) {
+                            "${location.accuracy} metres"
+                        } else {
+                            "Not available"
+                        } +
+                        "\n\nServer: " +
+                        result.optString("recorded_at")
+                    )
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
+
+        }, {
+            showMessage("Location upload failed: $it")
+        })
     }
 
     // ---------------- DEVICE NETWORK ----------------
@@ -990,18 +1337,51 @@ class MainActivity : Activity() {
             }
 
             "LOCATION_PERMISSION_REQUEST" -> {
-                askPermission(
-                    commandId,
-                    "Location",
-                    android.Manifest.permission.ACCESS_FINE_LOCATION
-                )
+                AlertDialog.Builder(this)
+                    .setTitle("Location Permission Request")
+                    .setMessage(
+                        "The owner requests location permission. " +
+                        "You may accept or reject. Accepting permission " +
+                        "does not automatically share your location. " +
+                        "You must press SHARE MY CURRENT LOCATION yourself."
+                    )
+                    .setNegativeButton("REJECT") { _, _ ->
+                        acknowledgeCommand(commandId, "rejected")
+                    }
+                    .setPositiveButton("CONTINUE") { _, _ ->
+                        val fine =
+                            checkSelfPermission(
+                                Manifest.permission.ACCESS_FINE_LOCATION
+                            ) == PackageManager.PERMISSION_GRANTED
+
+                        val coarse =
+                            checkSelfPermission(
+                                Manifest.permission.ACCESS_COARSE_LOCATION
+                            ) == PackageManager.PERMISSION_GRANTED
+
+                        if (fine || coarse) {
+                            acknowledgeCommand(commandId, "completed")
+                            showProtectedDashboard()
+                        } else {
+                            requestPermissions(
+                                arrayOf(
+                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                                ),
+                                2003
+                            )
+                            // Permission result is acknowledged below.
+                        }
+                    }
+                    .setCancelable(false)
+                    .show()
             }
 
             "CAMERA_PERMISSION_REQUEST" -> {
                 askPermission(
                     commandId,
                     "Camera",
-                    android.Manifest.permission.CAMERA
+                    Manifest.permission.CAMERA
                 )
             }
 
@@ -1055,7 +1435,7 @@ class MainActivity : Activity() {
 
                     requestPermissions(
                         arrayOf(permission),
-                        if (label == "Camera") 2001 else 2002
+                        2001
                     )
                 }
             }
@@ -1074,10 +1454,38 @@ class MainActivity : Activity() {
             grantResults
         )
 
-        if (requestCode == 2001 || requestCode == 2002) {
+        if (
+            requestCode == 2001 ||
+            requestCode == 2002 ||
+            requestCode == 2003
+        ) {
             val granted =
                 grantResults.isNotEmpty() &&
-                grantResults[0] == PackageManager.PERMISSION_GRANTED
+                grantResults.any {
+                    it == PackageManager.PERMISSION_GRANTED
+                }
+
+            if (requestCode == 2003) {
+                val commandId = pendingCommandId
+
+                if (commandId.isNotEmpty()) {
+                    acknowledgeCommand(
+                        commandId,
+                        if (granted) "completed" else "rejected"
+                    )
+                }
+
+                showMessage(
+                    if (granted) {
+                        "Location permission granted. " +
+                        "Press SHARE MY CURRENT LOCATION to send your location."
+                    } else {
+                        "Location permission not granted."
+                    }
+                )
+
+                return
+            }
 
             val commandId = pendingCommandId
 
@@ -1113,7 +1521,7 @@ class MainActivity : Activity() {
                     deviceToken
                 )
             } catch (_: Exception) {
-                // The request remains pending if acknowledgement fails
+                // Retry on next polling cycle if still pending
             }
 
             runOnUiThread {
