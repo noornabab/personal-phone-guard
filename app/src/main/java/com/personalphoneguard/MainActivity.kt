@@ -1,4 +1,3 @@
-
 package com.personalphoneguard
 
 import android.Manifest
@@ -9,6 +8,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.location.Location
 import android.net.Uri
 import android.os.Build
@@ -41,8 +42,15 @@ class MainActivity : ComponentActivity() {
         private const val ORIGIN =
             "https://allinoneprotection.support446-ff6.workers.dev"
 
-        private const val MAX_UPLOAD_BYTES =
-            80L * 1024L * 1024L
+        private const val BG = 0xFF080E1B.toInt()
+        private const val SURFACE = 0xFF111C2D.toInt()
+        private const val SURFACE_2 = 0xFF18263B.toInt()
+        private const val BLUE = 0xFF168BFF.toInt()
+        private const val CYAN = 0xFF24D5E8.toInt()
+        private const val WHITE = 0xFFF3F7FF.toInt()
+        private const val MUTED = 0xFF9AADC5.toInt()
+        private const val GREEN = 0xFF35D39A.toInt()
+        private const val RED = 0xFFFF5268.toInt()
     }
 
     private val prefs by lazy {
@@ -53,9 +61,7 @@ class MainActivity : ComponentActivity() {
         CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private lateinit var root: LinearLayout
-
-    private lateinit var fusedLocation:
-        FusedLocationProviderClient
+    private lateinit var fusedLocation: FusedLocationProviderClient
 
     private var deviceId = ""
     private var accountPassword = ""
@@ -69,8 +75,64 @@ class MainActivity : ComponentActivity() {
 
     private var locationSharing = false
     private var deviceRegistered = false
-
     private var recordingReceiverRegistered = false
+
+    // ------------------------------------------------
+    // DESIGN HELPERS
+    // ------------------------------------------------
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
+    private fun rounded(
+        color: Int,
+        radius: Int = 16,
+        strokeColor: Int? = null
+    ): GradientDrawable {
+
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dp(radius).toFloat()
+
+            if (strokeColor != null) {
+                setStroke(dp(1), strokeColor)
+            }
+        }
+    }
+
+    private fun cardBackground(): GradientDrawable =
+        rounded(SURFACE, 18, 0xFF26364D.toInt())
+
+    private fun addSpace(height: Int = 8) {
+        val space = View(this)
+        root.addView(
+            space,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(height)
+            )
+        )
+    }
+
+    private fun sectionTitle(value: String) {
+        val title = TextView(this).apply {
+            text = value.uppercase()
+            textSize = 12f
+            setTextColor(CYAN)
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.12f
+            setPadding(dp(3), dp(15), dp(3), dp(7))
+        }
+        addView(title)
+    }
+
+    private fun makeCard(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = cardBackground()
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+    }
 
     // ------------------------------------------------
     // RECORDING STATUS RECEIVER
@@ -83,7 +145,6 @@ class MainActivity : ComponentActivity() {
                 context: Context?,
                 intent: Intent?
             ) {
-
                 if (intent?.action != RecordingService.ACTION_STATUS) {
                     return
                 }
@@ -98,7 +159,6 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun registerRecordingReceiver() {
-
         if (recordingReceiverRegistered) return
 
         val filter = IntentFilter().apply {
@@ -116,7 +176,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun unregisterRecordingReceiver() {
-
         if (!recordingReceiverRegistered) return
 
         try {
@@ -128,7 +187,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun getSavedRecordingStatus(): String {
-
         return prefs.getString(
             "recording_status",
             "Not Recording"
@@ -143,7 +201,6 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
         ) {
-
             if (
                 hasPermission(Manifest.permission.CAMERA) &&
                 hasPermission(Manifest.permission.RECORD_AUDIO)
@@ -189,7 +246,6 @@ class MainActivity : ComponentActivity() {
     // ------------------------------------------------
 
     private val locationCallback = object : LocationCallback() {
-
         override fun onLocationResult(result: LocationResult) {
             for (location in result.locations) {
                 sendLocation(location)
@@ -203,6 +259,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        window.statusBarColor = BG
+        window.navigationBarColor = BG
+
+        if (Build.VERSION.SDK_INT >= 23) {
+            window.decorView.systemUiVisibility = 0
+        }
 
         fusedLocation =
             LocationServices.getFusedLocationProviderClient(this)
@@ -236,11 +299,15 @@ class MainActivity : ComponentActivity() {
 
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(245, 247, 250))
-            setPadding(18, 18, 18, 18)
+            setBackgroundColor(BG)
+            setPadding(dp(16), dp(12), dp(16), dp(24))
         }
 
-        val scroll = ScrollView(this)
+        val scroll = ScrollView(this).apply {
+            setBackgroundColor(BG)
+            isFillViewport = true
+            clipToPadding = false
+        }
 
         scroll.addView(
             root,
@@ -258,33 +325,76 @@ class MainActivity : ComponentActivity() {
         root.scrollTo(0, 0)
     }
 
-    private fun heading(value: String) {
+    private fun addBrandHeader(subtitle: String = "PERSONAL SECURITY SYSTEM") {
 
-        val view = TextView(this).apply {
-            text = value
-            textSize = 23f
-            setTextColor(Color.rgb(18, 60, 53))
-            setPadding(0, 12, 0, 18)
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setTypeface(
-                null,
-                android.graphics.Typeface.BOLD
+            background = rounded(SURFACE_2, 20, 0xFF24415F.toInt())
+            setPadding(dp(16), dp(22), dp(16), dp(20))
+        }
+
+        val logo = TextView(this).apply {
+            text = "PG"
+            textSize = 25f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            background = rounded(BLUE, 18)
+            layoutParams = LinearLayout.LayoutParams(
+                dp(62),
+                dp(62)
             )
         }
 
+        val name = TextView(this).apply {
+            text = "PERSONAL PHONE GUARD"
+            textSize = 19f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(12), 0, dp(4))
+        }
+
+        val sub = TextView(this).apply {
+            text = subtitle
+            textSize = 10f
+            letterSpacing = 0.16f
+            setTextColor(CYAN)
+            gravity = Gravity.CENTER
+        }
+
+        header.addView(logo)
+        header.addView(name)
+        header.addView(sub)
+
+        addView(header)
+        addSpace(12)
+    }
+
+    private fun heading(value: String) {
+        val view = TextView(this).apply {
+            text = value
+            textSize = 21f
+            setTextColor(WHITE)
+            setPadding(dp(2), dp(10), dp(2), dp(12))
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+        }
         addView(view)
     }
 
     private fun text(
         value: String,
-        size: Float = 15f
+        size: Float = 14f
     ): TextView {
 
         return TextView(this).apply {
             text = value
             textSize = size
-            setTextColor(Color.rgb(35, 45, 50))
-            setPadding(4, 8, 4, 8)
+            setTextColor(if (size <= 12f) MUTED else WHITE)
+            setPadding(dp(4), dp(7), dp(4), dp(7))
+            setLineSpacing(dp(2).toFloat(), 1f)
         }
     }
 
@@ -294,10 +404,14 @@ class MainActivity : ComponentActivity() {
     ): EditText {
 
         return EditText(this).apply {
-
             this.hint = hint
-            textSize = 15f
+            textSize = 14f
             setSingleLine(true)
+            setTextColor(WHITE)
+            setHintTextColor(MUTED)
+            background = rounded(SURFACE_2, 12, 0xFF344A65.toInt())
+            setPadding(dp(13), dp(5), dp(13), dp(5))
+            minimumHeight = dp(52)
 
             if (password) {
                 inputType =
@@ -312,24 +426,37 @@ class MainActivity : ComponentActivity() {
         action: () -> Unit
     ): Button {
 
+        val danger =
+            label.contains("Delete", true) ||
+            label.contains("Deactivate", true) ||
+            label.contains("Stop", true) ||
+            label.contains("Logout", true)
+
         return Button(this).apply {
             text = label
             isAllCaps = false
-            setOnClickListener {
-                action()
-            }
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            background = rounded(
+                if (danger) 0xFF9D344A.toInt() else BLUE,
+                12
+            )
+            elevation = dp(2).toFloat()
+            minimumHeight = dp(48)
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            setOnClickListener { action() }
         }
     }
 
     private fun addView(view: View) {
-
         root.addView(
             view,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin = 8
+                bottomMargin = dp(7)
             }
         )
     }
@@ -381,7 +508,6 @@ class MainActivity : ComponentActivity() {
             URL(API + path).openConnection() as HttpURLConnection
 
         try {
-
             connection.requestMethod = method
             connection.connectTimeout = 20000
             connection.readTimeout = 30000
@@ -408,7 +534,6 @@ class MainActivity : ComponentActivity() {
             }
 
             if (body != null) {
-
                 connection.doOutput = true
 
                 connection.setRequestProperty(
@@ -427,7 +552,6 @@ class MainActivity : ComponentActivity() {
                 connection.getHeaderField("Set-Cookie")
 
             if (!setCookie.isNullOrBlank()) {
-
                 val pair = setCookie.substringBefore(";")
 
                 if (pair.contains("=")) {
@@ -478,19 +602,22 @@ class MainActivity : ComponentActivity() {
     private fun showLogin() {
 
         clearScreen()
+        addBrandHeader("ADVANCED SECURITY CONTROL ROOM")
+        heading("Welcome Back")
 
-        heading("Personal Phone Guard")
+        val loginCard = makeCard()
 
-        addView(text("Login / Register"))
+        loginCard.addView(
+            text("LOGIN TO YOUR ACCOUNT", 12f)
+        )
 
         val username = input("Username")
         val password = input("Password", true)
 
-        addView(username)
-        addView(password)
+        loginCard.addView(username)
+        loginCard.addView(password)
 
-        addView(button("Login") {
-
+        loginCard.addView(button("LOGIN") {
             val user = username.text.toString().trim()
             val pass = password.text.toString()
 
@@ -502,8 +629,7 @@ class MainActivity : ComponentActivity() {
             login(user, pass)
         })
 
-        addView(button("Create New Account") {
-
+        loginCard.addView(button("CREATE NEW ACCOUNT") {
             val user = username.text.toString().trim()
             val pass = password.text.toString()
 
@@ -517,22 +643,22 @@ class MainActivity : ComponentActivity() {
             register(user, pass)
         })
 
-        addView(
+        loginCard.addView(
             text(
                 "Account Password কমপক্ষে ১০ অক্ষরের হতে হবে।",
-                13f
+                12f
             )
         )
+
+        addView(loginCard)
     }
 
     private fun register(
         username: String,
         password: String
     ) {
-
         scope.launch {
             try {
-
                 api(
                     "/api/register",
                     "POST",
@@ -554,10 +680,8 @@ class MainActivity : ComponentActivity() {
         username: String,
         password: String
     ) {
-
         scope.launch {
             try {
-
                 clearCookie()
 
                 api(
@@ -584,19 +708,15 @@ class MainActivity : ComponentActivity() {
                 showDashboard()
 
             } catch (e: Exception) {
-
                 clearCookie()
-
                 message("Login Error: ${e.message}")
             }
         }
     }
 
     private fun restoreSession() {
-
         scope.launch {
             try {
-
                 val result = api("/api/me")
 
                 val username =
@@ -617,7 +737,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun logout() {
-
         stopLocationSharing()
 
         scope.launch {
@@ -641,84 +760,193 @@ class MainActivity : ComponentActivity() {
     private fun showDashboard() {
 
         clearScreen()
+        addBrandHeader("ADVANCED SECURITY CONTROL ROOM")
 
         heading("Security Dashboard")
 
-        statusText = text(
-            "Account: ${prefs.getString("username", "")}"
-        )
-        addView(statusText!!)
+        val overview = makeCard()
 
-        addView(
+        overview.addView(
+            text("ACCOUNT", 11f)
+        )
+
+        overview.addView(
             text(
-                "This Device ID:\n$deviceId",
+                prefs.getString("username", "") ?: "",
+                19f
+            ).apply {
+                typeface = Typeface.DEFAULT_BOLD
+            }
+        )
+
+        overview.addView(
+            text("DEVICE IDENTIFICATION", 11f)
+        )
+
+        overview.addView(
+            text(deviceId, 11f)
+        )
+
+        statusText = text(
+            "Checking device status...",
+            13f
+        )
+
+        overview.addView(statusText!!)
+        overview.addView(
+            text(
+                "Recording: ${getSavedRecordingStatus()}",
                 12f
             )
         )
 
-        addView(button("Register / Refresh This Device") {
-            registerThisDevice()
-        })
+        addView(overview)
 
-        addView(button("Refresh Devices") {
-            loadDevices()
-        })
+        // DEVICE MANAGEMENT
+
+        sectionTitle("Device Management")
+
+        val deviceCard = makeCard()
+
+        deviceCard.addView(
+            button("Register / Refresh This Device") {
+                registerThisDevice()
+            }
+        )
+
+        deviceCard.addView(
+            button("Refresh Devices") {
+                loadDevices()
+            }
+        )
 
         deviceListBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-        addView(deviceListBox!!)
 
-        addView(text("LOCATION SHARING"))
+        deviceCard.addView(deviceListBox!!)
+        addView(deviceCard)
+
+        // LOCATION
+
+        sectionTitle("Location Services")
+
+        val locationCard = makeCard()
 
         locationStatus = text("Location sharing OFF")
-        addView(locationStatus!!)
 
-        addView(button("Start Location Sharing") {
-            requestLocation()
-        })
+        locationCard.addView(locationStatus!!)
 
-        addView(button("Stop Location Sharing") {
-            stopLocationSharing()
-        })
+        locationCard.addView(
+            button("Start Location Sharing") {
+                requestLocation()
+            }
+        )
 
-        addView(button("View Location History") {
-            loadLocations()
-        })
+        locationCard.addView(
+            button("Stop Location Sharing") {
+                stopLocationSharing()
+            }
+        )
+
+        locationCard.addView(
+            button("View Location History") {
+                loadLocations()
+            }
+        )
 
         locationListBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-        addView(locationListBox!!)
 
-        addView(text("VIDEO + AUDIO"))
+        locationCard.addView(locationListBox!!)
+        addView(locationCard)
 
-        addView(button("Open Recording Screen") {
-            showCameraScreen()
-        })
+        // RECORDING
 
-        addView(button("View Uploaded Videos") {
-            loadVideos()
-        })
+        sectionTitle("Recording Control")
+
+        val recordingCard = makeCard()
+
+        recordingCard.addView(
+            text("VIDEO + AUDIO RECORDING", 12f)
+        )
+
+        recordingCard.addView(
+            text(
+                "Recording is user-controlled. Start manually. " +
+                "A visible foreground notification remains active.",
+                12f
+            )
+        )
+
+        recordingCard.addView(
+            text(
+                "Current Status: ${getSavedRecordingStatus()}",
+                13f
+            )
+        )
+
+        recordingCard.addView(
+            button("Open Recording Screen") {
+                showCameraScreen()
+            }
+        )
+
+        addView(recordingCard)
+
+        // VIDEO VAULT
+
+        sectionTitle("Video Vault")
+
+        val videoCard = makeCard()
+
+        videoCard.addView(
+            button("View Uploaded Videos") {
+                loadVideos()
+            }
+        )
 
         videoListBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-        addView(videoListBox!!)
 
-        addView(text("EXPORT DATA"))
+        videoCard.addView(videoListBox!!)
+        addView(videoCard)
 
-        addView(button("Export JSON") {
-            exportData("json")
-        })
+        // EXPORT
 
-        addView(button("Export CSV") {
-            exportData("csv")
-        })
+        sectionTitle("Data Export")
 
-        addView(button("Logout") {
-            logout()
-        })
+        val exportCard = makeCard()
+
+        exportCard.addView(
+            button("Export JSON") {
+                exportData("json")
+            }
+        )
+
+        exportCard.addView(
+            button("Export CSV") {
+                exportData("csv")
+            }
+        )
+
+        addView(exportCard)
+
+        // ACCOUNT
+
+        sectionTitle("Account")
+
+        val accountCard = makeCard()
+
+        accountCard.addView(
+            button("Logout") {
+                logout()
+            }
+        )
+
+        addView(accountCard)
 
         registerThisDevice()
         loadDevices()
@@ -735,7 +963,6 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
-
                 api(
                     "/api/device/register",
                     "POST",
@@ -745,17 +972,13 @@ class MainActivity : ComponentActivity() {
                 )
 
                 deviceRegistered = true
-
                 setStatus("This device is active.")
 
                 message("Device Registered")
-
                 loadDevices()
 
             } catch (e: Exception) {
-
                 deviceRegistered = false
-
                 setStatus("Device: ${e.message}")
 
                 message(
@@ -766,10 +989,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadDevices() {
-
         scope.launch {
             try {
-
                 val result = api("/api/devices")
 
                 val devices =
@@ -794,17 +1015,14 @@ class MainActivity : ComponentActivity() {
                     val active =
                         item.optInt("active", 0) == 1
 
-                    val card = LinearLayout(this@MainActivity).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(10, 10, 10, 10)
-                        setBackgroundColor(Color.WHITE)
-                    }
+                    val card = makeCard()
 
                     card.addView(
                         text(
                             "$label\nID: $id\n" +
                             "Status: ${if (active) "Active" else "Deactivated"}\n" +
-                            "Last Seen: ${item.optString("last_seen")}"
+                            "Last Seen: ${item.optString("last_seen")}",
+                            12f
                         )
                     )
 
@@ -816,7 +1034,15 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    deviceListBox?.addView(card)
+                    deviceListBox?.addView(
+                        card,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(8)
+                        }
+                    )
                 }
 
             } catch (e: Exception) {
@@ -834,7 +1060,6 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
-
                 api(
                     "/api/device/deactivate",
                     "POST",
@@ -875,14 +1100,12 @@ class MainActivity : ComponentActivity() {
             hasPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
 
         if (!fine && !coarse) {
-
             locationPermissionLauncher.launch(
                 arrayOf(
                     Manifest.permission.ACCESS_FINE_LOCATION,
                     Manifest.permission.ACCESS_COARSE_LOCATION
                 )
             )
-
         } else {
             startLocationUpdates()
         }
@@ -896,7 +1119,6 @@ class MainActivity : ComponentActivity() {
         }
 
         try {
-
             val request =
                 LocationRequest.Builder(
                     Priority.PRIORITY_HIGH_ACCURACY,
@@ -929,7 +1151,6 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
-
                 api(
                     "/api/location",
                     "POST",
@@ -948,7 +1169,6 @@ class MainActivity : ComponentActivity() {
                     ).format(java.util.Date())
 
             } catch (e: Exception) {
-
                 locationStatus?.text =
                     "Location Upload Error: ${e.message}"
 
@@ -974,7 +1194,6 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
-
                 val result = api("/api/locations")
 
                 val locations =
@@ -999,11 +1218,7 @@ class MainActivity : ComponentActivity() {
                     val longitude =
                         item.optDouble("longitude")
 
-                    val card = LinearLayout(this@MainActivity).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(10, 10, 10, 10)
-                        setBackgroundColor(Color.WHITE)
-                    }
+                    val card = makeCard()
 
                     card.addView(
                         text(
@@ -1011,13 +1226,13 @@ class MainActivity : ComponentActivity() {
                             "Latitude: $latitude\n" +
                             "Longitude: $longitude\n" +
                             "Accuracy: ${item.optString("accuracy")}\n" +
-                            "Time: ${item.optString("created_at")}"
+                            "Time: ${item.optString("created_at")}",
+                            12f
                         )
                     )
 
                     card.addView(
                         button("Open in Google Maps") {
-
                             val uri = Uri.parse(
                                 "https://www.google.com/maps?q=$latitude,$longitude"
                             )
@@ -1028,7 +1243,15 @@ class MainActivity : ComponentActivity() {
                         }
                     )
 
-                    locationListBox?.addView(card)
+                    locationListBox?.addView(
+                        card,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(8)
+                        }
+                    )
                 }
 
             } catch (e: Exception) {
@@ -1044,34 +1267,47 @@ class MainActivity : ComponentActivity() {
     private fun showCameraScreen() {
 
         clearScreen()
+        addBrandHeader("RECORDING CONTROL CENTER")
 
         heading("Video + Audio Recording")
 
-        addView(
+        val card = makeCard()
+
+        card.addView(
             text(
                 "রেকর্ডিং ব্যবহারকারীর Start চাপার পর চালু হবে। " +
                 "সর্বোচ্চ ২০ মিনিট। অ্যাপ মিনিমাইজ করলে " +
-                "দৃশ্যমান Notification থাকবে।"
+                "দৃশ্যমান Notification থাকবে।",
+                13f
             )
         )
 
         recordingStatus = text(
-            getSavedRecordingStatus()
+            getSavedRecordingStatus(),
+            15f
         )
 
-        addView(recordingStatus!!)
+        card.addView(recordingStatus!!)
 
-        addView(button("Start Recording") {
-            requestCamera()
-        })
+        card.addView(
+            button("START RECORDING") {
+                requestCamera()
+            }
+        )
 
-        addView(button("Stop Recording") {
-            stopRecordingService()
-        })
+        card.addView(
+            button("STOP RECORDING") {
+                stopRecordingService()
+            }
+        )
 
-        addView(button("Back to Dashboard") {
-            showDashboard()
-        })
+        card.addView(
+            button("Back to Dashboard") {
+                showDashboard()
+            }
+        )
+
+        addView(card)
     }
 
     private fun requestCamera() {
@@ -1126,12 +1362,10 @@ class MainActivity : ComponentActivity() {
         }
 
         try {
-
             val serviceIntent = Intent(
                 this,
                 RecordingService::class.java
             ).apply {
-
                 action = RecordingService.ACTION_START
 
                 putExtra(
@@ -1181,7 +1415,6 @@ class MainActivity : ComponentActivity() {
     private fun stopRecordingService() {
 
         try {
-
             val intent = Intent(
                 this,
                 RecordingService::class.java
@@ -1195,7 +1428,6 @@ class MainActivity : ComponentActivity() {
             startService(intent)
 
         } catch (e: Exception) {
-
             message("Stop Error: ${e.message}")
         }
     }
@@ -1208,7 +1440,6 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
-
                 val result = api("/api/videos")
 
                 val videos =
@@ -1230,18 +1461,15 @@ class MainActivity : ComponentActivity() {
                     val id = item.optString("id")
                     val size = item.optLong("size_bytes")
 
-                    val card = LinearLayout(this@MainActivity).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(10, 10, 10, 10)
-                        setBackgroundColor(Color.WHITE)
-                    }
+                    val card = makeCard()
 
                     card.addView(
                         text(
                             "Video ID: $id\n" +
                             "Device: ${item.optString("device_id")}\n" +
                             "Size: ${"%.2f".format(size / 1048576.0)} MB\n" +
-                            "Date: ${item.optString("created_at")}"
+                            "Date: ${item.optString("created_at")}",
+                            12f
                         )
                     )
 
@@ -1257,7 +1485,15 @@ class MainActivity : ComponentActivity() {
                         }
                     )
 
-                    videoListBox?.addView(card)
+                    videoListBox?.addView(
+                        card,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(8)
+                        }
+                    )
                 }
 
             } catch (e: Exception) {
@@ -1296,7 +1532,6 @@ class MainActivity : ComponentActivity() {
             )
 
             try {
-
                 val output =
                     contentResolver.openOutputStream(uri)
                         ?: throw Exception(
@@ -1340,7 +1575,6 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
-
                 val saved = withContext(Dispatchers.IO) {
 
                     val connection =
@@ -1348,7 +1582,6 @@ class MainActivity : ComponentActivity() {
                             .openConnection() as HttpURLConnection
 
                     try {
-
                         connection.requestMethod = "GET"
                         connection.connectTimeout = 20000
                         connection.readTimeout = 120000
@@ -1359,7 +1592,6 @@ class MainActivity : ComponentActivity() {
                         )
 
                         if (connection.responseCode !in 200..299) {
-
                             val error =
                                 connection.errorStream
                                     ?.bufferedReader()
@@ -1374,7 +1606,6 @@ class MainActivity : ComponentActivity() {
                             "PPG_VIDEO_$id.mp4",
                             "video/mp4"
                         ) { output ->
-
                             connection.inputStream.use { input ->
                                 input.copyTo(output)
                             }
@@ -1410,7 +1641,6 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
-
                 api(
                     "/api/video/delete",
                     "POST",
@@ -1436,7 +1666,6 @@ class MainActivity : ComponentActivity() {
 
         scope.launch {
             try {
-
                 val saved = withContext(Dispatchers.IO) {
 
                     val connection =
@@ -1444,7 +1673,6 @@ class MainActivity : ComponentActivity() {
                             .openConnection() as HttpURLConnection
 
                     try {
-
                         connection.requestMethod = "GET"
                         connection.connectTimeout = 20000
                         connection.readTimeout = 60000
@@ -1455,7 +1683,6 @@ class MainActivity : ComponentActivity() {
                         )
 
                         if (connection.responseCode !in 200..299) {
-
                             val error =
                                 connection.errorStream
                                     ?.bufferedReader()
@@ -1480,7 +1707,6 @@ class MainActivity : ComponentActivity() {
                             "PPG_EXPORT_${System.currentTimeMillis()}.$extension",
                             mime
                         ) { output ->
-
                             connection.inputStream.use { input ->
                                 input.copyTo(output)
                             }
@@ -1520,7 +1746,6 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
 
         unregisterRecordingReceiver()
-
         stopLocationSharing()
 
         // চলমান RecordingService বন্ধ করা হচ্ছে না।
