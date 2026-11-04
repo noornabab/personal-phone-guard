@@ -1,3 +1,4 @@
+
 package com.personalphoneguard
 
 import android.Manifest
@@ -150,6 +151,23 @@ class RecordingService : LifecycleService() {
     private fun startForegroundSafely() {
 
         try {
+
+            val cameraPermission =
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.CAMERA
+                ) == PackageManager.PERMISSION_GRANTED
+
+            val audioPermission =
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+
+            if (!cameraPermission || !audioPermission) {
+                fail("Camera অথবা Microphone permission নেই")
+                return
+            }
 
             val notification = buildNotification(
                 "Camera চালু হচ্ছে..."
@@ -416,7 +434,6 @@ class RecordingService : LifecycleService() {
         }
     }
 
-    // Save a copy into the phone's public Movies folder.
     private fun saveToGallery(file: File): Uri {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -544,7 +561,6 @@ class RecordingService : LifecycleService() {
 
             try {
 
-                // First save to public Gallery.
                 try {
 
                     galleryUri = saveToGallery(file).toString()
@@ -571,7 +587,6 @@ class RecordingService : LifecycleService() {
                     updateNotification("Video Server-এ Upload হচ্ছে...")
                 }
 
-                // Then upload the original file to Cloudinary through Worker.
                 connection =
                     (URL("$API/api/video").openConnection()
                         as HttpURLConnection)
