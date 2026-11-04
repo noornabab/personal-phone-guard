@@ -1,4 +1,3 @@
-
 package com.personalphoneguard
 
 import android.Manifest
@@ -6,14 +5,17 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
@@ -326,7 +328,7 @@ class RecordingService : LifecycleService() {
                     }
 
                     is VideoRecordEvent.Status -> {
-                        // CameraX recording progress event.
+                        // Recording progress
                     }
 
                     is VideoRecordEvent.Finalize -> {
@@ -351,7 +353,7 @@ class RecordingService : LifecycleService() {
                             ) {
 
                                 publishStatus(
-                                    "ফোনে ভিডিও Save হয়েছে। Upload প্রস্তুত হচ্ছে...",
+                                    "Recording সম্পন্ন। Gallery-তে Save হচ্ছে...",
                                     savedFile.absolutePath
                                 )
 
@@ -359,10 +361,9 @@ class RecordingService : LifecycleService() {
 
                             } else {
 
-                                val reason =
+                                fail(
                                     "Recording Finalize Error: ${event.error}"
-
-                                fail(reason)
+                                )
                             }
                         }
                     }
@@ -385,7 +386,9 @@ class RecordingService : LifecycleService() {
         stopRequested = true
 
         if (uploadInProgress) {
-            publishStatus("ভিডিও Upload হচ্ছে। Local Copy নিরাপদ আছে।")
+            publishStatus(
+                "Recording শেষ। Gallery Save / Server Upload চলছে।"
+            )
             return
         }
 
@@ -395,23 +398,128 @@ class RecordingService : LifecycleService() {
 
             if (recording != null) {
 
-                if (isRecording) {
-                    publishStatus("Recording বন্ধ হচ্ছে...")
-                    updateNotification("Recording বন্ধ হচ্ছে...")
-                }
+                publishStatus("Recording বন্ধ হচ্ছে...")
+                updateNotification("Recording বন্ধ হচ্ছে...")
 
                 recording.stop()
 
             } else if (!isRecording) {
 
-                // Camera initialization এখনও চললে
-                // callback stopRequested দেখে থামবে।
-                publishStatus("Recording বন্ধের অনুরোধ গ্রহণ করা হয়েছে।")
+                publishStatus(
+                    "Recording বন্ধের অনুরোধ গ্রহণ করা হয়েছে।"
+                )
             }
 
         } catch (e: Exception) {
 
             fail("Stop Error: ${e.message}")
+        }
+    }
+
+    // Save a copy into the phone's public Movies folder.
+    private fun saveToGallery(file: File): Uri {
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+
+            val values = ContentValues().apply {
+                put(
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    file.name
+                )
+                put(
+                    MediaStore.MediaColumns.MIME_TYPE,
+                    "video/mp4"
+                )
+                put(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    Environment.DIRECTORY_MOVIES +
+                        "/PersonalPhoneGuard"
+                )
+                put(
+                    MediaStore.MediaColumns.IS_PENDING,
+                    1
+                )
+            }
+
+            val resolver = contentResolver
+
+            val uri = resolver.insert(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                values
+            ) ?: throw Exception("Gallery file তৈরি করা যায়নি")
+
+            try {
+
+                resolver.openOutputStream(uri)?.use { output ->
+
+                    file.inputStream().use { input ->
+                        input.copyTo(output)
+                    }
+
+                } ?: throw Exception("Gallery output stream পাওয়া যায়নি")
+
+                val completedValues = ContentValues().apply {
+                    put(
+                        MediaStore.MediaColumns.IS_PENDING,
+                        0
+                    )
+                }
+
+                resolver.update(
+                    uri,
+                    completedValues,
+                    null,
+                    null
+                )
+
+                getSharedPreferences(
+                    "phone_guard",
+                    MODE_PRIVATE
+                ).edit()
+                    .putString(
+                        "recording_gallery_uri",
+                        uri.toString()
+                    )
+                    .apply()
+
+                return uri
+
+            } catch (e: Exception) {
+
+                resolver.delete(uri, null, null)
+                throw e
+            }
+
+        } else {
+
+            @Suppress("DEPRECATION")
+            val directory = File(
+                Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_MOVIES
+                ),
+                "PersonalPhoneGuard"
+            )
+
+            if (!directory.exists() && !directory.mkdirs()) {
+                throw Exception("Gallery folder তৈরি করা যায়নি")
+            }
+
+            val destination = File(directory, file.name)
+
+            file.inputStream().use { input ->
+                destination.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+
+            val scanIntent = Intent(
+                Intent.ACTION_MEDIA_SCANNER_SCAN_FILE,
+                Uri.fromFile(destination)
+            )
+
+            sendBroadcast(scanIntent)
+
+            return Uri.fromFile(destination)
         }
     }
 
@@ -422,18 +530,48 @@ class RecordingService : LifecycleService() {
         uploadInProgress = true
 
         publishStatus(
-            "ফোনে Save হয়েছে। Server-এ Upload হচ্ছে...",
+            "ফোনে ভিডিও Finalize হয়েছে। Gallery Save হচ্ছে...",
             file.absolutePath
         )
 
-        updateNotification("Video Upload হচ্ছে...")
+        updateNotification("Gallery-তে Video Save হচ্ছে...")
 
         uploadExecutor.execute {
 
+            var galleryUri: String? = null
+            var galleryError: String? = null
             var connection: HttpURLConnection? = null
 
             try {
 
+                // First save to public Gallery.
+                try {
+
+                    galleryUri = saveToGallery(file).toString()
+
+                } catch (e: Exception) {
+
+                    galleryError = e.message
+                }
+
+                handler.post {
+
+                    if (galleryUri != null) {
+                        publishStatus(
+                            "Gallery-তে ভিডিও Save হয়েছে। Server Upload হচ্ছে...",
+                            file.absolutePath
+                        )
+                    } else {
+                        publishStatus(
+                            "Gallery Save হয়নি: ${galleryError ?: "Unknown error"}। Server Upload হচ্ছে...",
+                            file.absolutePath
+                        )
+                    }
+
+                    updateNotification("Video Server-এ Upload হচ্ছে...")
+                }
+
+                // Then upload the original file to Cloudinary through Worker.
                 connection =
                     (URL("$API/api/video").openConnection()
                         as HttpURLConnection)
@@ -441,7 +579,9 @@ class RecordingService : LifecycleService() {
                 connection.requestMethod = "POST"
                 connection.connectTimeout = 30000
                 connection.readTimeout = 300000
+                connection.doInput = true
                 connection.doOutput = true
+                connection.useCaches = false
 
                 connection.setRequestProperty(
                     "Cookie",
@@ -458,6 +598,11 @@ class RecordingService : LifecycleService() {
                     "video/mp4"
                 )
 
+                connection.setRequestProperty(
+                    "Accept",
+                    "application/json"
+                )
+
                 connection.setFixedLengthStreamingMode(
                     file.length()
                 )
@@ -465,22 +610,40 @@ class RecordingService : LifecycleService() {
                 connection.outputStream.use { output ->
 
                     file.inputStream().use { input ->
-                        input.copyTo(output)
+
+                        val buffer = ByteArray(64 * 1024)
+
+                        while (true) {
+
+                            val count = input.read(buffer)
+
+                            if (count == -1) break
+
+                            output.write(buffer, 0, count)
+                        }
+
+                        output.flush()
                     }
                 }
 
                 val responseCode =
                     connection.responseCode
 
-                if (responseCode !in 200..299) {
-
-                    val error =
+                val responseText =
+                    if (responseCode in 200..299) {
+                        connection.inputStream
+                            .bufferedReader()
+                            .use { it.readText() }
+                    } else {
                         connection.errorStream
                             ?.bufferedReader()
                             ?.use { it.readText() }
+                            ?: "HTTP $responseCode"
+                    }
 
+                if (responseCode !in 200..299) {
                     throw Exception(
-                        error ?: "HTTP $responseCode"
+                        "HTTP $responseCode: $responseText"
                     )
                 }
 
@@ -489,7 +652,11 @@ class RecordingService : LifecycleService() {
                     uploadInProgress = false
 
                     val status =
-                        "Upload সফল। ফোনেও Local Copy আছে।"
+                        if (galleryUri != null) {
+                            "Upload সফল। Gallery ও Server-এ ভিডিও Save হয়েছে।"
+                        } else {
+                            "Server Upload সফল। তবে Gallery Save হয়নি: $galleryError"
+                        }
 
                     publishStatus(
                         status,
@@ -513,7 +680,11 @@ class RecordingService : LifecycleService() {
                     uploadInProgress = false
 
                     val status =
-                        "Upload ব্যর্থ। ফোনে Local Copy সংরক্ষিত আছে। কারণ: ${e.message}"
+                        if (galleryUri != null) {
+                            "Server Upload ব্যর্থ। Gallery-তে Local Copy আছে। কারণ: ${e.message}"
+                        } else {
+                            "Server Upload ব্যর্থ। App-এর Local Copy আছে। Gallery Save Error: $galleryError। কারণ: ${e.message}"
+                        }
 
                     publishStatus(
                         status,
@@ -717,7 +888,6 @@ class RecordingService : LifecycleService() {
         releaseCamera()
 
         cameraExecutor.shutdown()
-
         uploadExecutor.shutdown()
 
         isRecording = false
