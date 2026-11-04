@@ -1,61 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>  <manifest xmlns:android="http://schemas.android.com/apk/res/android">  <uses-permission android:name="android.permission.INTERNET" />  
 
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<uses-permission android:name="android.permission.CAMERA" />  
+<uses-permission android:name="android.permission.RECORD_AUDIO" />  
 
-    <!-- Internet -->
-    <uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />  
+<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />  
 
-    <!-- Camera and Microphone -->
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />  
 
-    <!-- Location -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />  
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />  
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />  
 
-    <!-- Notifications -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+<application  
+    android:allowBackup="false"  
+    android:label="Personal Phone Guard"  
+    android:theme="@android:style/Theme.Material.Light.NoActionBar"  
+    android:usesCleartextTraffic="false">  
 
-    <!-- Foreground Service -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <activity  
+        android:name=".MainActivity"  
+        android:exported="true">  
 
-    <!-- Hardware features -->
-    <uses-feature
-        android:name="android.hardware.camera"
-        android:required="false" />
+        <intent-filter>  
+            <action android:name="android.intent.action.MAIN" />  
+            <category android:name="android.intent.category.LAUNCHER" />  
+        </intent-filter>  
 
-    <uses-feature
-        android:name="android.hardware.microphone"
-        android:required="false" />
+    </activity>  
 
-    <application
-        android:allowBackup="false"
-        android:label="Personal Phone Guard"
-        android:theme="@android:style/Theme.Material.NoActionBar"
-        android:usesCleartextTraffic="false"
-        android:supportsRtl="true">
+    <service  
+        android:name=".RecordingService"  
+        android:exported="false"  
+        android:stopWithTask="false"  
+        android:foregroundServiceType="camera|microphone" />  
 
-        <!-- Main Activity -->
-        <activity
-            android:name=".MainActivity"
-            android:exported="true">
-
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-
-        </activity>
-
-        <!-- Visible Recording Foreground Service -->
-        <service
-            android:name=".RecordingService"
-            android:exported="false"
-            android:stopWithTask="false"
-            android:foregroundServiceType="camera|microphone" />
-
-    </application>
+</application>
 
 </manifest>
