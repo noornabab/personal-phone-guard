@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import androidx.camera.core.CameraSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -40,12 +41,16 @@ class RecordingService : LifecycleService() {
         const val ACTION_STOP =
             "com.personalphoneguard.action.STOP"
 
+        const val ACTION_STATUS =
+            "com.personalphoneguard.action.STATUS"
+
         const val ACTION_FINISHED =
             "com.personalphoneguard.action.FINISHED"
 
         const val EXTRA_VIDEO_PATH = "video_path"
         const val EXTRA_COOKIE = "extra_cookie"
         const val EXTRA_DEVICE = "extra_device"
+        const val EXTRA_STATUS = "extra_status"
 
         private const val CHANNEL_ID = "ppg_recording_channel"
         private const val NOTIFICATION_ID = 2001
@@ -65,16 +70,24 @@ class RecordingService : LifecycleService() {
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var activeRecording: Recording? = null
-
     private var recordingFile: File? = null
+
     private var sessionCookie = ""
     private var deviceId = ""
 
+    @Volatile
     private var isRecording = false
+
+    @Volatile
     private var stopRequested = false
+
+    @Volatile
     private var uploadInProgress = false
 
+    private var serviceStarted = false
+
     private val stopTimer = Runnable {
+        publishStatus("২০ মিনিট পূর্ণ হয়েছে। Recording বন্ধ হচ্ছে...")
         stopRecording()
     }
 
@@ -94,20 +107,30 @@ class RecordingService : LifecycleService() {
         when (intent?.action) {
 
             ACTION_START -> {
-                if (!isRecording && activeRecording == null) {
-                    sessionCookie =
-                        intent.getStringExtra(EXTRA_COOKIE) ?: ""
 
-                    deviceId =
-                        intent.getStringExtra(EXTRA_DEVICE) ?: ""
-
-                    if (sessionCookie.isBlank() || deviceId.isBlank()) {
-                        stopServiceNow()
-                        return START_NOT_STICKY
-                    }
-
-                    startForegroundSafely()
+                if (serviceStarted || isRecording || uploadInProgress) {
+                    return START_NOT_STICKY
                 }
+
+                stopRequested = false
+                isRecording = false
+                uploadInProgress = false
+
+                sessionCookie =
+                    intent.getStringExtra(EXTRA_COOKIE) ?: ""
+
+                deviceId =
+                    intent.getStringExtra(EXTRA_DEVICE) ?: ""
+
+                if (
+                    sessionCookie.isBlank() ||
+                    deviceId.isBlank()
+                ) {
+                    fail("Login session অথবা Device ID পাওয়া যায়নি")
+                    return START_NOT_STICKY
+                }
+
+                startForegroundSafely()
             }
 
             ACTION_STOP -> {
@@ -123,54 +146,69 @@ class RecordingService : LifecycleService() {
     }
 
     private fun startForegroundSafely() {
+
         try {
+
             val notification = buildNotification(
-                "Recording is starting..."
+                "Camera চালু হচ্ছে..."
             )
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+
                 startForeground(
                     NOTIFICATION_ID,
                     notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                 )
+
             } else {
+
                 startForeground(
                     NOTIFICATION_ID,
                     notification
                 )
             }
 
+            serviceStarted = true
+
+            publishStatus("Camera চালু হচ্ছে...")
             startCameraRecording()
 
         } catch (e: Exception) {
-            stopServiceNow()
+
+            fail("Foreground Service Error: ${e.message}")
         }
     }
 
     private fun startCameraRecording() {
 
         val cameraPermission =
-            checkSelfPermission(Manifest.permission.CAMERA) ==
-                PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
 
         val audioPermission =
-            checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
-                PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
 
         if (!cameraPermission || !audioPermission) {
-            stopServiceNow()
+            fail("Camera অথবা Microphone permission নেই")
             return
         }
 
         try {
+
             val providerFuture =
                 ProcessCameraProvider.getInstance(this)
 
             providerFuture.addListener({
 
                 try {
+
                     if (stopRequested) {
                         stopServiceNow()
                         return@addListener
@@ -196,16 +234,21 @@ class RecordingService : LifecycleService() {
                         capture
                     )
 
+                    publishStatus("Camera প্রস্তুত। Recording শুরু হচ্ছে...")
+                    updateNotification("Camera প্রস্তুত...")
+
                     beginRecording(capture)
 
                 } catch (e: Exception) {
-                    stopServiceNow()
+
+                    fail("Camera চালু হয়নি: ${e.message}")
                 }
 
-            }, cameraExecutor)
+            }, ContextCompat.getMainExecutor(this))
 
         } catch (e: Exception) {
-            stopServiceNow()
+
+            fail("Camera Error: ${e.message}")
         }
     }
 
@@ -220,13 +263,16 @@ class RecordingService : LifecycleService() {
 
         val directory = getExternalFilesDir(
             Environment.DIRECTORY_MOVIES
-        ) ?: run {
-            stopServiceNow()
+        )
+
+        if (directory == null) {
+            fail("ফোনে Video Storage পাওয়া যায়নি")
             return
         }
 
-        if (!directory.exists()) {
-            directory.mkdirs()
+        if (!directory.exists() && !directory.mkdirs()) {
+            fail("Video Folder তৈরি করা যায়নি")
+            return
         }
 
         val file = File(
@@ -236,15 +282,15 @@ class RecordingService : LifecycleService() {
 
         recordingFile = file
 
-        val outputOptions =
-            FileOutputOptions.Builder(file).build()
-
         try {
+
+            val outputOptions =
+                FileOutputOptions.Builder(file).build()
+
             val pending =
-                capture.output.prepareRecording(
-                    this,
-                    outputOptions
-                ).withAudioEnabled()
+                capture.output
+                    .prepareRecording(this, outputOptions)
+                    .withAudioEnabled()
 
             activeRecording = pending.start(
                 cameraExecutor
@@ -253,98 +299,148 @@ class RecordingService : LifecycleService() {
                 when (event) {
 
                     is VideoRecordEvent.Start -> {
-                        isRecording = true
 
-                        updateNotification(
-                            "Video recording is active"
-                        )
+                        handler.post {
 
-                        handler.postDelayed(
-                            stopTimer,
-                            MAX_RECORDING_MS
-                        )
+                            isRecording = true
 
-                        if (stopRequested) {
-                            stopRecording()
+                            publishStatus(
+                                "Recording চলছে। সর্বোচ্চ ২০ মিনিট।"
+                            )
+
+                            updateNotification(
+                                "Video + Audio Recording চলছে"
+                            )
+
+                            handler.removeCallbacks(stopTimer)
+
+                            handler.postDelayed(
+                                stopTimer,
+                                MAX_RECORDING_MS
+                            )
+
+                            if (stopRequested) {
+                                stopRecording()
+                            }
                         }
+                    }
+
+                    is VideoRecordEvent.Status -> {
+                        // CameraX recording progress event.
                     }
 
                     is VideoRecordEvent.Finalize -> {
 
-                        isRecording = false
+                        handler.post {
 
-                        handler.removeCallbacks(stopTimer)
+                            isRecording = false
 
-                        activeRecording = null
+                            handler.removeCallbacks(stopTimer)
 
-                        releaseCamera()
+                            activeRecording = null
 
-                        val resultFile = recordingFile
+                            releaseCamera()
 
-                        if (
-                            !event.hasError() &&
-                            resultFile != null &&
-                            resultFile.exists() &&
-                            resultFile.length() > 0
-                        ) {
-                            uploadVideo(resultFile)
-                        } else {
-                            updateNotification(
-                                "Recording failed"
-                            )
-                            stopServiceNow()
+                            val savedFile = recordingFile
+
+                            if (
+                                !event.hasError() &&
+                                savedFile != null &&
+                                savedFile.exists() &&
+                                savedFile.length() > 0
+                            ) {
+
+                                publishStatus(
+                                    "ফোনে ভিডিও Save হয়েছে। Upload প্রস্তুত হচ্ছে...",
+                                    savedFile.absolutePath
+                                )
+
+                                uploadVideo(savedFile)
+
+                            } else {
+
+                                val reason =
+                                    "Recording Finalize Error: ${event.error}"
+
+                                fail(reason)
+                            }
                         }
                     }
                 }
             }
 
         } catch (e: Exception) {
+
             handler.removeCallbacks(stopTimer)
             releaseCamera()
-            stopServiceNow()
+
+            fail("Recording শুরু হয়নি: ${e.message}")
         }
     }
 
     private fun stopRecording() {
 
         handler.removeCallbacks(stopTimer)
+
         stopRequested = true
 
+        if (uploadInProgress) {
+            publishStatus("ভিডিও Upload হচ্ছে। Local Copy নিরাপদ আছে।")
+            return
+        }
+
         try {
+
             val recording = activeRecording
 
             if (recording != null) {
+
+                if (isRecording) {
+                    publishStatus("Recording বন্ধ হচ্ছে...")
+                    updateNotification("Recording বন্ধ হচ্ছে...")
+                }
+
                 recording.stop()
-            } else if (!uploadInProgress) {
-                stopServiceNow()
+
+            } else if (!isRecording) {
+
+                // Camera initialization এখনও চললে
+                // callback stopRequested দেখে থামবে।
+                publishStatus("Recording বন্ধের অনুরোধ গ্রহণ করা হয়েছে।")
             }
 
         } catch (e: Exception) {
-            releaseCamera()
-            stopServiceNow()
+
+            fail("Stop Error: ${e.message}")
         }
     }
 
     private fun uploadVideo(file: File) {
 
+        if (uploadInProgress) return
+
         uploadInProgress = true
 
-        updateNotification(
-            "Uploading recorded video..."
+        publishStatus(
+            "ফোনে Save হয়েছে। Server-এ Upload হচ্ছে...",
+            file.absolutePath
         )
+
+        updateNotification("Video Upload হচ্ছে...")
 
         uploadExecutor.execute {
 
             var connection: HttpURLConnection? = null
 
             try {
+
                 connection =
                     (URL("$API/api/video").openConnection()
                         as HttpURLConnection)
 
                 connection.requestMethod = "POST"
                 connection.connectTimeout = 30000
-                connection.readTimeout = 180000
+                connection.readTimeout = 300000
                 connection.doOutput = true
 
                 connection.setRequestProperty(
@@ -367,6 +463,7 @@ class RecordingService : LifecycleService() {
                 )
 
                 connection.outputStream.use { output ->
+
                     file.inputStream().use { input ->
                         input.copyTo(output)
                     }
@@ -376,39 +473,136 @@ class RecordingService : LifecycleService() {
                     connection.responseCode
 
                 if (responseCode !in 200..299) {
+
                     val error =
                         connection.errorStream
                             ?.bufferedReader()
                             ?.use { it.readText() }
 
                     throw Exception(
-                        error ?: "Upload failed: $responseCode"
+                        error ?: "HTTP $responseCode"
                     )
                 }
 
                 handler.post {
-                    updateNotification(
-                        "Video uploaded successfully"
+
+                    uploadInProgress = false
+
+                    val status =
+                        "Upload সফল। ফোনেও Local Copy আছে।"
+
+                    publishStatus(
+                        status,
+                        file.absolutePath
                     )
+
+                    updateNotification(status)
+
+                    sendFinishedBroadcast(
+                        "uploaded",
+                        file.absolutePath
+                    )
+
                     stopServiceNow()
                 }
 
             } catch (e: Exception) {
 
                 handler.post {
-                    updateNotification(
-                        "Upload failed. Local video retained."
+
+                    uploadInProgress = false
+
+                    val status =
+                        "Upload ব্যর্থ। ফোনে Local Copy সংরক্ষিত আছে। কারণ: ${e.message}"
+
+                    publishStatus(
+                        status,
+                        file.absolutePath
                     )
+
+                    updateNotification(
+                        "Upload ব্যর্থ। Local Video সংরক্ষিত আছে।"
+                    )
+
+                    sendFinishedBroadcast(
+                        "upload_failed",
+                        file.absolutePath
+                    )
+
                     stopServiceNow()
                 }
 
             } finally {
+
                 connection?.disconnect()
             }
         }
     }
 
+    private fun publishStatus(
+        status: String,
+        path: String = ""
+    ) {
+
+        val prefs = getSharedPreferences(
+            "phone_guard",
+            MODE_PRIVATE
+        )
+
+        prefs.edit()
+            .putString("recording_status", status)
+            .putString(
+                "recording_video_path",
+                path.ifBlank {
+                    prefs.getString(
+                        "recording_video_path",
+                        ""
+                    ) ?: ""
+                }
+            )
+            .apply()
+
+        val broadcast = Intent(ACTION_STATUS).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_STATUS, status)
+            putExtra(EXTRA_VIDEO_PATH, path)
+        }
+
+        sendBroadcast(broadcast)
+    }
+
+    private fun sendFinishedBroadcast(
+        result: String,
+        path: String
+    ) {
+
+        val intent = Intent(ACTION_FINISHED).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_STATUS, result)
+            putExtra(EXTRA_VIDEO_PATH, path)
+        }
+
+        sendBroadcast(intent)
+    }
+
+    private fun fail(reason: String) {
+
+        handler.removeCallbacks(stopTimer)
+
+        isRecording = false
+        uploadInProgress = false
+
+        publishStatus("Failed: $reason")
+
+        updateNotification("Recording ব্যর্থ হয়েছে")
+
+        releaseCamera()
+
+        stopServiceNow()
+    }
+
     private fun releaseCamera() {
+
         try {
             cameraProvider?.unbindAll()
         } catch (_: Exception) {
@@ -472,6 +666,7 @@ class RecordingService : LifecycleService() {
     }
 
     private fun updateNotification(status: String) {
+
         val manager =
             getSystemService(NotificationManager::class.java)
 
@@ -491,7 +686,7 @@ class RecordingService : LifecycleService() {
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description =
-                    "Shows recording and upload status"
+                    "Shows visible video recording and upload status"
                 setShowBadge(false)
             }
 
@@ -502,7 +697,10 @@ class RecordingService : LifecycleService() {
     }
 
     private fun stopServiceNow() {
+
         handler.removeCallbacks(stopTimer)
+
+        serviceStarted = false
 
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -523,6 +721,7 @@ class RecordingService : LifecycleService() {
         uploadExecutor.shutdown()
 
         isRecording = false
+        serviceStarted = false
 
         super.onDestroy()
     }
