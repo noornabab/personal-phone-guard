@@ -2,8 +2,11 @@
 package com.personalphoneguard
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.location.Location
@@ -67,6 +70,71 @@ class MainActivity : ComponentActivity() {
     private var locationSharing = false
     private var deviceRegistered = false
 
+    private var recordingReceiverRegistered = false
+
+    // ------------------------------------------------
+    // RECORDING STATUS RECEIVER
+    // ------------------------------------------------
+
+    private val recordingStatusReceiver =
+        object : BroadcastReceiver() {
+
+            override fun onReceive(
+                context: Context?,
+                intent: Intent?
+            ) {
+
+                if (intent?.action != RecordingService.ACTION_STATUS) {
+                    return
+                }
+
+                val status =
+                    intent.getStringExtra(
+                        RecordingService.EXTRA_STATUS
+                    ) ?: return
+
+                recordingStatus?.text = status
+            }
+        }
+
+    private fun registerRecordingReceiver() {
+
+        if (recordingReceiverRegistered) return
+
+        val filter = IntentFilter().apply {
+            addAction(RecordingService.ACTION_STATUS)
+        }
+
+        ContextCompat.registerReceiver(
+            this,
+            recordingStatusReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
+        recordingReceiverRegistered = true
+    }
+
+    private fun unregisterRecordingReceiver() {
+
+        if (!recordingReceiverRegistered) return
+
+        try {
+            unregisterReceiver(recordingStatusReceiver)
+        } catch (_: Exception) {
+        }
+
+        recordingReceiverRegistered = false
+    }
+
+    private fun getSavedRecordingStatus(): String {
+
+        return prefs.getString(
+            "recording_status",
+            "Not Recording"
+        ) ?: "Not Recording"
+    }
+
     // ------------------------------------------------
     // PERMISSIONS
     // ------------------------------------------------
@@ -90,8 +158,6 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) {
-            // Notification permission না দিলেও Android-এর
-            // foreground service notification সংক্রান্ত নিয়ম প্রযোজ্য।
             startRecordingService()
         }
 
@@ -155,6 +221,11 @@ class MainActivity : ComponentActivity() {
         } else {
             restoreSession()
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        registerRecordingReceiver()
     }
 
     // ------------------------------------------------
@@ -984,7 +1055,10 @@ class MainActivity : ComponentActivity() {
             )
         )
 
-        recordingStatus = text("Not Recording")
+        recordingStatus = text(
+            getSavedRecordingStatus()
+        )
+
         addView(recordingStatus!!)
 
         addView(button("Start Recording") {
@@ -1071,24 +1145,36 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
+            prefs.edit()
+                .putString(
+                    "recording_status",
+                    "Recording Service Starting..."
+                )
+                .apply()
+
+            recordingStatus?.text =
+                "Recording Service Starting..."
+
             ContextCompat.startForegroundService(
                 this,
                 serviceIntent
             )
 
-            recordingStatus?.text =
-                "Recording Service Starting..."
-
-            message("Recording Service চালু করার অনুরোধ পাঠানো হয়েছে")
+            message(
+                "Recording Service চালু করার অনুরোধ পাঠানো হয়েছে"
+            )
 
         } catch (e: Exception) {
 
-            recordingStatus?.text =
-                "Service Error: ${e.message}"
+            val error = "Service Error: ${e.message}"
 
-            message(
-                "Service Start Error: ${e.message}"
-            )
+            recordingStatus?.text = error
+
+            prefs.edit()
+                .putString("recording_status", error)
+                .apply()
+
+            message(error)
         }
     }
 
@@ -1103,12 +1189,13 @@ class MainActivity : ComponentActivity() {
                 action = RecordingService.ACTION_STOP
             }
 
+            recordingStatus?.text =
+                "Recording বন্ধ করার অনুরোধ পাঠানো হয়েছে..."
+
             startService(intent)
 
-            recordingStatus?.text =
-                "Stop requested"
-
         } catch (e: Exception) {
+
             message("Stop Error: ${e.message}")
         }
     }
@@ -1421,6 +1508,8 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
 
+        unregisterRecordingReceiver()
+
         // Location sharing Activity-নির্ভর।
         // RecordingService এখানে বন্ধ করা হচ্ছে না।
         if (locationSharing) {
@@ -1429,6 +1518,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+
+        unregisterRecordingReceiver()
 
         stopLocationSharing()
 
