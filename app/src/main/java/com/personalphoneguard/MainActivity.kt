@@ -427,7 +427,7 @@ class MainActivity : ComponentActivity() {
     ): Button {
 
         val danger =
-            label.contains("Delete", true) ||
+            label.contains("Delete", false) ||
             label.contains("Deactivate", true) ||
             label.contains("Stop", true) ||
             label.contains("Logout", true)
@@ -602,7 +602,7 @@ class MainActivity : ComponentActivity() {
     private fun showLogin() {
 
         clearScreen()
-        addBrandHeader("ADVANCED SECURITY CONTROL ROOM")
+        addBrandHeader("বানিয়েছে _ নূর ইসলাম")
         heading("Welcome Back")
 
         val loginCard = makeCard()
@@ -760,7 +760,7 @@ class MainActivity : ComponentActivity() {
     private fun showDashboard() {
 
         clearScreen()
-        addBrandHeader("ADVANCED SECURITY CONTROL ROOM")
+        addBrandHeader("বানিয়েছে _ নূর ইসলাম")
 
         heading("Security Dashboard")
 
