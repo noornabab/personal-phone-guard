@@ -1,8 +1,6 @@
-
 package com.personalphoneguard
 
 import android.Manifest
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -14,7 +12,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
-import android.os.IBinder
 import android.os.Looper
 import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
@@ -38,881 +35,520 @@ import java.util.concurrent.Executors
 class RecordingService : LifecycleService() {
 
     companion object {
-        const val ACTION_START =
-            "com.personalphoneguard.action.START"
-
-        const val ACTION_STOP =
-            "com.personalphoneguard.action.STOP"
-
-        const val ACTION_STATUS =
-            "com.personalphoneguard.action.STATUS"
-
-        const val ACTION_FINISHED =
-            "com.personalphoneguard.action.FINISHED"
+        const val ACTION_START   = "com.personalphoneguard.action.START"
+        const val ACTION_STOP    = "com.personalphoneguard.action.STOP"
+        const val ACTION_STATUS  = "com.personalphoneguard.action.STATUS"
+        const val ACTION_FINISHED = "com.personalphoneguard.action.FINISHED"
 
         const val EXTRA_VIDEO_PATH = "video_path"
-        const val EXTRA_COOKIE = "extra_cookie"
-        const val EXTRA_DEVICE = "extra_device"
-        const val EXTRA_STATUS = "extra_status"
+        const val EXTRA_COOKIE     = "extra_cookie"
+        const val EXTRA_DEVICE     = "extra_device"
+        const val EXTRA_STATUS     = "extra_status"
 
-        private const val CHANNEL_ID = "ppg_recording_channel"
-        private const val NOTIFICATION_ID = 2001
-        private const val MAX_RECORDING_MS = 20 * 60 * 1000L
+        private const val CHANNEL_ID       = "ppg_recording_channel"
+        private const val NOTIFICATION_ID  = 2001
 
-        private const val API =
-            "https://allinoneprotection.support446-ff6.workers.dev"
+        // ১৫ মিনিট পরপর নতুন chunk শুরু হবে
+        private const val MAX_CHUNK_MS = 15 * 60 * 1000L
+
+        // মোট ৮ ঘণ্টা পর সব বন্ধ হবে
+        private const val MAX_TOTAL_MS = 8 * 60 * 60 * 1000L
+
+        // ভিডিও ৩০০ kbps + অডিও ৬৪ kbps → প্রতি chunk ~৩৪ MB
+        private const val VIDEO_BITRATE = 300_000
+        private const val AUDIO_BITRATE = 64_000
+
+        private const val API = "https://allinoneprotection.support446-ff6.workers.dev"
     }
 
-    private val handler = Handler(Looper.getMainLooper())
+    private val handler        = Handler(Looper.getMainLooper())
+    private val cameraExecutor : ExecutorService = Executors.newSingleThreadExecutor()
+    private val uploadExecutor : ExecutorService = Executors.newSingleThreadExecutor()
 
-    private val cameraExecutor: ExecutorService =
-        Executors.newSingleThreadExecutor()
-
-    private val uploadExecutor: ExecutorService =
-        Executors.newSingleThreadExecutor()
-
-    private var cameraProvider: ProcessCameraProvider? = null
+    private var cameraProvider : ProcessCameraProvider? = null
+    private var videoCapture   : VideoCapture<Recorder>? = null
     private var activeRecording: Recording? = null
-    private var recordingFile: File? = null
+    private var recordingFile  : File? = null
 
     private var sessionCookie = ""
-    private var deviceId = ""
+    private var deviceId      = ""
 
-    @Volatile
-    private var isRecording = false
+    @Volatile private var isRecording    = false
+    @Volatile private var stopRequested  = false
+    @Volatile private var chunkCount     = 0
+    @Volatile private var uploadsRunning = 0
 
-    @Volatile
-    private var stopRequested = false
+    private var serviceStarted   = false
+    private var sessionStartTime = 0L
 
-    @Volatile
-    private var uploadInProgress = false
+    // ১৫ মিনিট পর বর্তমান chunk শেষ করে নতুনটা শুরু করে
+    private val chunkTimer = Runnable {
+        if (!stopRequested) {
+            val c = chunkCount
+            publishStatus("Chunk $c শেষ। পরবর্তী chunk শুরু হচ্ছে...")
+            rotateChunk()
+        }
+    }
 
-    private var serviceStarted = false
-
-    private val stopTimer = Runnable {
-        publishStatus("২০ মিনিট পূর্ণ হয়েছে। Recording বন্ধ হচ্ছে...")
+    // ৮ ঘণ্টা পর সব বন্ধ করে
+    private val totalTimer = Runnable {
+        publishStatus("৮ ঘণ্টা সম্পন্ন। Recording বন্ধ হচ্ছে...")
+        stopRequested = true
         stopRecording()
     }
+
+    // ------------------------------------------------
+    // LIFECYCLE
+    // ------------------------------------------------
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
     }
 
-    override fun onStartCommand(
-        intent: Intent?,
-        flags: Int,
-        startId: Int
-    ): Int {
-
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
 
         when (intent?.action) {
-
             ACTION_START -> {
+                if (serviceStarted || isRecording) return START_NOT_STICKY
 
-                if (serviceStarted || isRecording || uploadInProgress) {
-                    return START_NOT_STICKY
-                }
+                stopRequested  = false
+                isRecording    = false
+                chunkCount     = 0
+                uploadsRunning = 0
+                sessionStartTime = System.currentTimeMillis()
 
-                stopRequested = false
-                isRecording = false
-                uploadInProgress = false
+                sessionCookie = intent.getStringExtra(EXTRA_COOKIE) ?: ""
+                deviceId      = intent.getStringExtra(EXTRA_DEVICE) ?: ""
 
-                sessionCookie =
-                    intent.getStringExtra(EXTRA_COOKIE) ?: ""
-
-                deviceId =
-                    intent.getStringExtra(EXTRA_DEVICE) ?: ""
-
-                if (
-                    sessionCookie.isBlank() ||
-                    deviceId.isBlank()
-                ) {
-                    fail("Login session অথবা Device ID পাওয়া যায়নি")
+                if (sessionCookie.isBlank() || deviceId.isBlank()) {
+                    fail("Login session অথবা Device ID পাওয়া যায়নি")
                     return START_NOT_STICKY
                 }
 
                 startForegroundSafely()
             }
-
-            ACTION_STOP -> {
-                stopRecording()
-            }
-
-            else -> {
-                stopServiceNow()
-            }
+            ACTION_STOP -> stopRecording()
+            else        -> stopServiceNow()
         }
 
         return START_NOT_STICKY
     }
 
+    override fun onDestroy() {
+        handler.removeCallbacks(chunkTimer)
+        handler.removeCallbacks(totalTimer)
+        cameraExecutor.shutdownNow()
+        uploadExecutor.shutdownNow()
+        releaseCamera()
+        super.onDestroy()
+    }
+
+    // ------------------------------------------------
+    // FOREGROUND START
+    // ------------------------------------------------
+
     private fun startForegroundSafely() {
-
         try {
+            val hasCamera = ContextCompat.checkSelfPermission(
+                this, Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
 
-            val cameraPermission =
-                ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.CAMERA
-                ) == PackageManager.PERMISSION_GRANTED
+            val hasAudio = ContextCompat.checkSelfPermission(
+                this, Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
 
-            val audioPermission =
-                ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.RECORD_AUDIO
-                ) == PackageManager.PERMISSION_GRANTED
-
-            if (!cameraPermission || !audioPermission) {
+            if (!hasCamera || !hasAudio) {
                 fail("Camera অথবা Microphone permission নেই")
                 return
             }
 
-            val notification = buildNotification(
-                "Camera চালু হচ্ছে..."
-            )
+            val notification = buildNotification("Camera চালু হচ্ছে...")
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-
                 startForeground(
-                    NOTIFICATION_ID,
-                    notification,
+                    NOTIFICATION_ID, notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                 )
-
             } else {
-
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification
-                )
+                startForeground(NOTIFICATION_ID, notification)
             }
 
             serviceStarted = true
-
             publishStatus("Camera চালু হচ্ছে...")
-            startCameraRecording()
+            startCameraAndRecord()
 
         } catch (e: Exception) {
-
             fail("Foreground Service Error: ${e.message}")
         }
     }
 
-    private fun startCameraRecording() {
+    // ------------------------------------------------
+    // CAMERA SETUP
+    // ------------------------------------------------
 
-        val cameraPermission =
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED
-
-        val audioPermission =
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-
-        if (!cameraPermission || !audioPermission) {
-            fail("Camera অথবা Microphone permission নেই")
-            return
-        }
-
+    private fun startCameraAndRecord() {
         try {
+            val future = ProcessCameraProvider.getInstance(this)
 
-            val providerFuture =
-                ProcessCameraProvider.getInstance(this)
-
-            providerFuture.addListener({
-
+            future.addListener({
                 try {
+                    if (stopRequested) { stopServiceNow(); return@addListener }
 
-                    if (stopRequested) {
-                        stopServiceNow()
-                        return@addListener
-                    }
-
-                    val provider = providerFuture.get()
+                    val provider = future.get()
                     cameraProvider = provider
 
                     val recorder = Recorder.Builder()
-                        .setQualitySelector(
-                            QualitySelector.from(Quality.SD)
-                        )
+                        .setQualitySelector(QualitySelector.from(Quality.LOWEST))
+                        .setTargetVideoEncodingBitRate(VIDEO_BITRATE)
                         .build()
 
-                    val capture =
-                        VideoCapture.withOutput(recorder)
+                    videoCapture = VideoCapture.withOutput(recorder)
 
                     provider.unbindAll()
-
                     provider.bindToLifecycle(
                         this,
                         CameraSelector.DEFAULT_FRONT_CAMERA,
-                        capture
+                        videoCapture!!
                     )
 
-                    publishStatus("Camera প্রস্তুত। Recording শুরু হচ্ছে...")
-                    updateNotification("Camera প্রস্তুত...")
+                    // ৮ ঘণ্টার মোট টাইমার শুরু
+                    handler.removeCallbacks(totalTimer)
+                    handler.postDelayed(totalTimer, MAX_TOTAL_MS)
 
-                    beginRecording(capture)
+                    publishStatus("Camera প্রস্তুত। Chunk 1 শুরু হচ্ছে...")
+                    updateNotification("● Video + Audio Recording চলছে")
+
+                    beginChunk()
 
                 } catch (e: Exception) {
-
-                    fail("Camera চালু হয়নি: ${e.message}")
+                    fail("Camera চালু হয়নি: ${e.message}")
                 }
 
             }, ContextCompat.getMainExecutor(this))
 
         } catch (e: Exception) {
-
             fail("Camera Error: ${e.message}")
         }
     }
 
-    private fun beginRecording(
-        capture: VideoCapture<Recorder>
-    ) {
+    // ------------------------------------------------
+    // CHUNK RECORDING
+    // ------------------------------------------------
 
-        if (stopRequested) {
-            stopServiceNow()
+    private fun beginChunk() {
+        if (stopRequested) { stopServiceNow(); return }
+
+        val directory = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+        if (directory == null || (!directory.exists() && !directory.mkdirs())) {
+            fail("Video Storage পাওয়া যায়নি")
             return
         }
 
-        val directory = getExternalFilesDir(
-            Environment.DIRECTORY_MOVIES
-        )
-
-        if (directory == null) {
-            fail("ফোনে Video Storage পাওয়া যায়নি")
-            return
-        }
-
-        if (!directory.exists() && !directory.mkdirs()) {
-            fail("Video Folder তৈরি করা যায়নি")
-            return
-        }
-
-        val file = File(
-            directory,
-            "PPG_${System.currentTimeMillis()}.mp4"
-        )
-
+        val file = File(directory, "PPG_${System.currentTimeMillis()}.mp4")
         recordingFile = file
 
         try {
+            val outputOptions = FileOutputOptions.Builder(file).build()
 
-            val outputOptions =
-                FileOutputOptions.Builder(file).build()
+            val pending = videoCapture!!.output
+                .prepareRecording(this, outputOptions)
+                .withAudioEnabled()
 
-            val pending =
-                capture.output
-                    .prepareRecording(this, outputOptions)
-                    .withAudioEnabled()
-
-            activeRecording = pending.start(
-                cameraExecutor
-            ) { event ->
+            activeRecording = pending.start(cameraExecutor) { event ->
 
                 when (event) {
 
                     is VideoRecordEvent.Start -> {
-
                         handler.post {
-
                             isRecording = true
+                            chunkCount++
+
+                            val elapsedMin = (System.currentTimeMillis() - sessionStartTime) / 60_000
+                            val remainMin  = (MAX_TOTAL_MS / 60_000) - elapsedMin
 
                             publishStatus(
-                                "Recording চলছে। সর্বোচ্চ ২০ মিনিট।"
+                                "● Chunk $chunkCount চলছে | মোট বাকি: ${remainMin} মিনিট"
                             )
-
                             updateNotification(
-                                "Video + Audio Recording চলছে"
+                                "● Recording চলছে — Chunk $chunkCount | বাকি: ${remainMin} মিনিট"
                             )
 
-                            handler.removeCallbacks(stopTimer)
+                            // ১৫ মিনিট পর পরের chunk শুরু
+                            handler.removeCallbacks(chunkTimer)
+                            handler.postDelayed(chunkTimer, MAX_CHUNK_MS)
 
-                            handler.postDelayed(
-                                stopTimer,
-                                MAX_RECORDING_MS
-                            )
-
-                            if (stopRequested) {
-                                stopRecording()
-                            }
+                            if (stopRequested) stopRecording()
                         }
-                    }
-
-                    is VideoRecordEvent.Status -> {
-                        // Recording progress
                     }
 
                     is VideoRecordEvent.Finalize -> {
-
                         handler.post {
-
                             isRecording = false
-
-                            handler.removeCallbacks(stopTimer)
-
+                            handler.removeCallbacks(chunkTimer)
                             activeRecording = null
 
-                            releaseCamera()
+                            val saved = recordingFile
 
-                            val savedFile = recordingFile
-
-                            if (
-                                !event.hasError() &&
-                                savedFile != null &&
-                                savedFile.exists() &&
-                                savedFile.length() > 0
+                            if (!event.hasError() &&
+                                saved != null &&
+                                saved.exists() &&
+                                saved.length() > 0
                             ) {
+                                // ব্যাকগ্রাউন্ডে এই chunk আপলোড করো
+                                uploadChunk(saved, chunkCount)
 
-                                publishStatus(
-                                    "Recording সম্পন্ন। Gallery-তে Save হচ্ছে...",
-                                    savedFile.absolutePath
-                                )
-
-                                uploadVideo(savedFile)
-
+                                if (!stopRequested) {
+                                    // পরের chunk শুরু
+                                    beginChunk()
+                                }
+                                // stopRequested হলে uploadChunk শেষে stopServiceNow() ডাকবে
                             } else {
-
-                                fail(
-                                    "Recording Finalize Error: ${event.error}"
-                                )
+                                if (!stopRequested) {
+                                    publishStatus("Chunk $chunkCount Error। পরেরটা শুরু হচ্ছে...")
+                                    beginChunk()
+                                } else {
+                                    stopServiceIfIdle()
+                                }
                             }
                         }
                     }
+
+                    else -> { /* VideoRecordEvent.Status — progress, ignore */ }
                 }
             }
 
         } catch (e: Exception) {
+            handler.removeCallbacks(chunkTimer)
+            fail("Chunk শুরু হয়নি: ${e.message}")
+        }
+    }
 
-            handler.removeCallbacks(stopTimer)
-            releaseCamera()
-
-            fail("Recording শুরু হয়নি: ${e.message}")
+    // বর্তমান chunk শেষ করো (Finalize event আসবে → beginChunk() ডাকবে)
+    private fun rotateChunk() {
+        try {
+            activeRecording?.stop()
+        } catch (e: Exception) {
+            fail("Rotate Error: ${e.message}")
         }
     }
 
     private fun stopRecording() {
-
-        handler.removeCallbacks(stopTimer)
-
+        handler.removeCallbacks(chunkTimer)
         stopRequested = true
 
-        if (uploadInProgress) {
-            publishStatus(
-                "Recording শেষ। Gallery Save / Server Upload চলছে।"
-            )
-            return
-        }
-
         try {
-
-            val recording = activeRecording
-
-            if (recording != null) {
-
+            if (activeRecording != null) {
                 publishStatus("Recording বন্ধ হচ্ছে...")
                 updateNotification("Recording বন্ধ হচ্ছে...")
-
-                recording.stop()
-
+                activeRecording!!.stop()
             } else if (!isRecording) {
-
-                publishStatus(
-                    "Recording বন্ধের অনুরোধ গ্রহণ করা হয়েছে।"
-                )
+                stopServiceIfIdle()
             }
-
         } catch (e: Exception) {
-
             fail("Stop Error: ${e.message}")
         }
     }
 
-    private fun saveToGallery(file: File): Uri {
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-
-            val values = ContentValues().apply {
-                put(
-                    MediaStore.MediaColumns.DISPLAY_NAME,
-                    file.name
-                )
-                put(
-                    MediaStore.MediaColumns.MIME_TYPE,
-                    "video/mp4"
-                )
-                put(
-                    MediaStore.MediaColumns.RELATIVE_PATH,
-                    Environment.DIRECTORY_MOVIES +
-                        "/PersonalPhoneGuard"
-                )
-                put(
-                    MediaStore.MediaColumns.IS_PENDING,
-                    1
-                )
-            }
-
-            val resolver = contentResolver
-
-            val uri = resolver.insert(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                values
-            ) ?: throw Exception("Gallery file তৈরি করা যায়নি")
-
-            try {
-
-                resolver.openOutputStream(uri)?.use { output ->
-
-                    file.inputStream().use { input ->
-                        input.copyTo(output)
-                    }
-
-                } ?: throw Exception("Gallery output stream পাওয়া যায়নি")
-
-                val completedValues = ContentValues().apply {
-                    put(
-                        MediaStore.MediaColumns.IS_PENDING,
-                        0
-                    )
-                }
-
-                resolver.update(
-                    uri,
-                    completedValues,
-                    null,
-                    null
-                )
-
-                getSharedPreferences(
-                    "phone_guard",
-                    MODE_PRIVATE
-                ).edit()
-                    .putString(
-                        "recording_gallery_uri",
-                        uri.toString()
-                    )
-                    .apply()
-
-                return uri
-
-            } catch (e: Exception) {
-
-                resolver.delete(uri, null, null)
-                throw e
-            }
-
+    // সব আপলোড শেষ হলেই সার্ভিস বন্ধ করো
+    private fun stopServiceIfIdle() {
+        if (uploadsRunning <= 0 && activeRecording == null && !isRecording) {
+            stopServiceNow()
         } else {
-
-            @Suppress("DEPRECATION")
-            val directory = File(
-                Environment.getExternalStoragePublicDirectory(
-                    Environment.DIRECTORY_MOVIES
-                ),
-                "PersonalPhoneGuard"
-            )
-
-            if (!directory.exists() && !directory.mkdirs()) {
-                throw Exception("Gallery folder তৈরি করা যায়নি")
-            }
-
-            val destination = File(directory, file.name)
-
-            file.inputStream().use { input ->
-                destination.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-
-            val scanIntent = Intent(
-                Intent.ACTION_MEDIA_SCANNER_SCAN_FILE,
-                Uri.fromFile(destination)
-            )
-
-            sendBroadcast(scanIntent)
-
-            return Uri.fromFile(destination)
+            publishStatus("আপলোড শেষ হওয়ার পর সার্ভিস বন্ধ হবে...")
         }
     }
 
-    private fun uploadVideo(file: File) {
+    // ------------------------------------------------
+    // UPLOAD
+    // ------------------------------------------------
 
-        if (uploadInProgress) return
-
-        uploadInProgress = true
-
-        publishStatus(
-            "ফোনে ভিডিও Finalize হয়েছে। Gallery Save হচ্ছে...",
-            file.absolutePath
-        )
-
-        updateNotification("Gallery-তে Video Save হচ্ছে...")
+    private fun uploadChunk(file: File, index: Int) {
+        uploadsRunning++
 
         uploadExecutor.execute {
-
-            var galleryUri: String? = null
-            var galleryError: String? = null
             var connection: HttpURLConnection? = null
 
             try {
-
-                try {
-
-                    galleryUri = saveToGallery(file).toString()
-
-                } catch (e: Exception) {
-
-                    galleryError = e.message
-                }
+                // Gallery-তেও সেভ করো
+                try { saveToGallery(file) } catch (_: Exception) {}
 
                 handler.post {
-
-                    if (galleryUri != null) {
-                        publishStatus(
-                            "Gallery-তে ভিডিও Save হয়েছে। Server Upload হচ্ছে...",
-                            file.absolutePath
-                        )
-                    } else {
-                        publishStatus(
-                            "Gallery Save হয়নি: ${galleryError ?: "Unknown error"}। Server Upload হচ্ছে...",
-                            file.absolutePath
-                        )
-                    }
-
-                    updateNotification("Video Server-এ Upload হচ্ছে...")
+                    publishStatus("Chunk $index আপলোড হচ্ছে (${file.length() / 1_048_576} MB)...")
                 }
 
-                connection =
-                    (URL("$API/api/video").openConnection()
-                        as HttpURLConnection)
-
+                connection = URL("$API/api/video").openConnection() as HttpURLConnection
                 connection.requestMethod = "POST"
-                connection.connectTimeout = 30000
-                connection.readTimeout = 300000
-                connection.doInput = true
+                connection.connectTimeout = 30_000
+                connection.readTimeout    = 300_000
+                connection.doInput  = true
                 connection.doOutput = true
                 connection.useCaches = false
 
-                connection.setRequestProperty(
-                    "Cookie",
-                    sessionCookie
-                )
+                connection.setRequestProperty("Cookie",       sessionCookie)
+                connection.setRequestProperty("X-Device-ID",  deviceId)
+                connection.setRequestProperty("Content-Type", "video/mp4")
+                connection.setRequestProperty("Accept",       "application/json")
+                connection.setFixedLengthStreamingMode(file.length())
 
-                connection.setRequestProperty(
-                    "X-Device-ID",
-                    deviceId
-                )
-
-                connection.setRequestProperty(
-                    "Content-Type",
-                    "video/mp4"
-                )
-
-                connection.setRequestProperty(
-                    "Accept",
-                    "application/json"
-                )
-
-                connection.setFixedLengthStreamingMode(
-                    file.length()
-                )
-
-                connection.outputStream.use { output ->
-
+                connection.outputStream.use { out ->
                     file.inputStream().use { input ->
-
                         val buffer = ByteArray(64 * 1024)
-
                         while (true) {
-
-                            val count = input.read(buffer)
-
-                            if (count == -1) break
-
-                            output.write(buffer, 0, count)
+                            val n = input.read(buffer)
+                            if (n == -1) break
+                            out.write(buffer, 0, n)
                         }
-
-                        output.flush()
+                        out.flush()
                     }
                 }
 
-                val responseCode =
-                    connection.responseCode
-
-                val responseText =
-                    if (responseCode in 200..299) {
-                        connection.inputStream
-                            .bufferedReader()
-                            .use { it.readText() }
-                    } else {
-                        connection.errorStream
-                            ?.bufferedReader()
-                            ?.use { it.readText() }
-                            ?: "HTTP $responseCode"
-                    }
-
-                if (responseCode !in 200..299) {
-                    throw Exception(
-                        "HTTP $responseCode: $responseText"
-                    )
+                val code = connection.responseCode
+                if (code !in 200..299) {
+                    val err = connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "HTTP $code"
+                    throw Exception("HTTP $code: $err")
                 }
 
                 handler.post {
-
-                    uploadInProgress = false
-
-                    val status =
-                        if (galleryUri != null) {
-                            "Upload সফল। Gallery ও Server-এ ভিডিও Save হয়েছে।"
-                        } else {
-                            "Server Upload সফল। তবে Gallery Save হয়নি: $galleryError"
-                        }
-
-                    publishStatus(
-                        status,
-                        file.absolutePath
-                    )
-
-                    updateNotification(status)
-
-                    sendFinishedBroadcast(
-                        "uploaded",
-                        file.absolutePath
-                    )
-
-                    stopServiceNow()
+                    uploadsRunning--
+                    publishStatus("Chunk $index সার্ভারে সেভ হয়েছে ✓")
+                    if (stopRequested) stopServiceIfIdle()
                 }
 
             } catch (e: Exception) {
-
                 handler.post {
-
-                    uploadInProgress = false
-
-                    val status =
-                        if (galleryUri != null) {
-                            "Server Upload ব্যর্থ। Gallery-তে Local Copy আছে। কারণ: ${e.message}"
-                        } else {
-                            "Server Upload ব্যর্থ। App-এর Local Copy আছে। Gallery Save Error: $galleryError। কারণ: ${e.message}"
-                        }
-
-                    publishStatus(
-                        status,
-                        file.absolutePath
-                    )
-
-                    updateNotification(
-                        "Upload ব্যর্থ। Local Video সংরক্ষিত আছে।"
-                    )
-
-                    sendFinishedBroadcast(
-                        "upload_failed",
-                        file.absolutePath
-                    )
-
-                    stopServiceNow()
+                    uploadsRunning--
+                    publishStatus("Chunk $index Upload Error: ${e.message}। Local copy সংরক্ষিত।")
+                    if (stopRequested) stopServiceIfIdle()
                 }
-
             } finally {
-
                 connection?.disconnect()
             }
         }
     }
 
-    private fun publishStatus(
-        status: String,
-        path: String = ""
-    ) {
+    // ------------------------------------------------
+    // GALLERY SAVE
+    // ------------------------------------------------
 
-        val prefs = getSharedPreferences(
-            "phone_guard",
-            MODE_PRIVATE
-        )
+    private fun saveToGallery(file: File): Uri {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/PersonalPhoneGuard")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
 
-        prefs.edit()
-            .putString("recording_status", status)
-            .putString(
-                "recording_video_path",
-                path.ifBlank {
-                    prefs.getString(
-                        "recording_video_path",
-                        ""
-                    ) ?: ""
-                }
+            val uri = contentResolver.insert(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values
+            ) ?: throw Exception("Gallery URI তৈরি হয়নি")
+
+            try {
+                contentResolver.openOutputStream(uri)?.use { out ->
+                    file.inputStream().use { it.copyTo(out) }
+                } ?: throw Exception("Output stream পাওয়া যায়নি")
+
+                contentResolver.update(
+                    uri,
+                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                    null, null
+                )
+                return uri
+            } catch (e: Exception) {
+                contentResolver.delete(uri, null, null)
+                throw e
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+                "PersonalPhoneGuard"
             )
-            .apply()
-
-        val broadcast = Intent(ACTION_STATUS).apply {
-            setPackage(packageName)
-            putExtra(EXTRA_STATUS, status)
-            putExtra(EXTRA_VIDEO_PATH, path)
+            if (!dir.exists()) dir.mkdirs()
+            val dest = File(dir, file.name)
+            file.inputStream().use { i -> dest.outputStream().use { o -> i.copyTo(o) } }
+            sendBroadcast(Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(dest)))
+            return Uri.fromFile(dest)
         }
-
-        sendBroadcast(broadcast)
     }
 
-    private fun sendFinishedBroadcast(
-        result: String,
-        path: String
-    ) {
+    // ------------------------------------------------
+    // NOTIFICATION
+    // ------------------------------------------------
 
-        val intent = Intent(ACTION_FINISHED).apply {
-            setPackage(packageName)
-            putExtra(EXTRA_STATUS, result)
-            putExtra(EXTRA_VIDEO_PATH, path)
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Recording Service",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Personal Phone Guard recording notification"
+                setShowBadge(false)
+            }
+            getSystemService(NotificationManager::class.java)
+                ?.createNotificationChannel(channel)
         }
+    }
 
-        sendBroadcast(intent)
+    private fun buildNotification(text: String): android.app.Notification {
+        val stopIntent = PendingIntent.getService(
+            this, 0,
+            Intent(this, RecordingService::class.java).apply { action = ACTION_STOP },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Personal Phone Guard")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setOngoing(true)
+            .setSilent(true)
+            .addAction(android.R.drawable.ic_media_pause, "Recording বন্ধ করুন", stopIntent)
+            .build()
+    }
+
+    private fun updateNotification(text: String) {
+        try {
+            getSystemService(NotificationManager::class.java)
+                ?.notify(NOTIFICATION_ID, buildNotification(text))
+        } catch (_: Exception) {}
+    }
+
+    // ------------------------------------------------
+    // HELPERS
+    // ------------------------------------------------
+
+    private fun publishStatus(status: String, path: String? = null) {
+        getSharedPreferences("phone_guard", MODE_PRIVATE)
+            .edit().putString("recording_status", status).apply()
+
+        sendBroadcast(Intent(ACTION_STATUS).apply {
+            putExtra(EXTRA_STATUS, status)
+            if (path != null) putExtra(EXTRA_VIDEO_PATH, path)
+        })
     }
 
     private fun fail(reason: String) {
-
-        handler.removeCallbacks(stopTimer)
-
-        isRecording = false
-        uploadInProgress = false
-
-        publishStatus("Failed: $reason")
-
-        updateNotification("Recording ব্যর্থ হয়েছে")
-
-        releaseCamera()
-
+        publishStatus("Error: $reason")
         stopServiceNow()
     }
 
     private fun releaseCamera() {
-
-        try {
-            cameraProvider?.unbindAll()
-        } catch (_: Exception) {
-        }
-
+        try { cameraProvider?.unbindAll() } catch (_: Exception) {}
         cameraProvider = null
-    }
-
-    private fun buildNotification(
-        status: String
-    ): Notification {
-
-        val stopIntent = Intent(
-            this,
-            RecordingService::class.java
-        ).apply {
-            action = ACTION_STOP
-        }
-
-        val stopPendingIntent = PendingIntent.getService(
-            this,
-            1002,
-            stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or
-                PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val openIntent = Intent(
-            this,
-            MainActivity::class.java
-        )
-
-        val openPendingIntent = PendingIntent.getActivity(
-            this,
-            1001,
-            openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or
-                PendingIntent.FLAG_IMMUTABLE
-        )
-
-        return NotificationCompat.Builder(
-            this,
-            CHANNEL_ID
-        )
-            .setSmallIcon(
-                android.R.drawable.presence_video_online
-            )
-            .setContentTitle("Personal Phone Guard")
-            .setContentText(status)
-            .setContentIntent(openPendingIntent)
-            .setOngoing(true)
-            .setCategory(
-                NotificationCompat.CATEGORY_SERVICE
-            )
-            .addAction(
-                android.R.drawable.ic_media_pause,
-                "Stop Recording",
-                stopPendingIntent
-            )
-            .build()
-    }
-
-    private fun updateNotification(status: String) {
-
-        val manager =
-            getSystemService(NotificationManager::class.java)
-
-        manager.notify(
-            NOTIFICATION_ID,
-            buildNotification(status)
-        )
-    }
-
-    private fun createNotificationChannel() {
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Recording Status",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description =
-                    "Shows visible video recording and upload status"
-                setShowBadge(false)
-            }
-
-            getSystemService(
-                NotificationManager::class.java
-            ).createNotificationChannel(channel)
-        }
+        videoCapture   = null
     }
 
     private fun stopServiceNow() {
-
-        handler.removeCallbacks(stopTimer)
-
-        serviceStarted = false
-
-        try {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } catch (_: Exception) {
-        }
-
-        stopSelf()
-    }
-
-    override fun onDestroy() {
-
-        handler.removeCallbacks(stopTimer)
-
+        handler.removeCallbacks(chunkTimer)
+        handler.removeCallbacks(totalTimer)
         releaseCamera()
-
-        cameraExecutor.shutdown()
-        uploadExecutor.shutdown()
-
-        isRecording = false
         serviceStarted = false
-
-        super.onDestroy()
-    }
-
-    override fun onBind(intent: Intent): IBinder? {
-        super.onBind(intent)
-        return null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 }
