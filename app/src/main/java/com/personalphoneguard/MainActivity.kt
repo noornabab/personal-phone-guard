@@ -602,8 +602,8 @@ class MainActivity : ComponentActivity() {
     private fun showLogin() {
 
         clearScreen()
-        addBrandHeader("ADVANCED SECURITY CONTROL ROOM")
-        heading("Welcome Back")
+        addBrandHeader("ফোন নিরাপদ প্রতিশ্রুতিতে আমাদের যাত্রা")
+        heading("স্বাগতম Personal Phone Guard এ")
 
         val loginCard = makeCard()
 
@@ -760,9 +760,9 @@ class MainActivity : ComponentActivity() {
     private fun showDashboard() {
 
         clearScreen()
-        addBrandHeader("ADVANCED SECURITY CONTROL ROOM")
+        addBrandHeader("Created By_ Noor Islam")
 
-        heading("Security Dashboard")
+        heading("আপনার ফোন,নিরাপদ রাখতে সচেতন হোন")
 
         val overview = makeCard()
 
@@ -1382,7 +1382,7 @@ class MainActivity : ComponentActivity() {
             prefs.edit()
                 .putString(
                     "recording_status",
-                    "Recording Service Starting..."
+                    "Recording শুরু হলো..."
                 )
                 .apply()
 
