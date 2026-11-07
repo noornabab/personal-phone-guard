@@ -1,7 +1,6 @@
 package com.personalphoneguard
 
 import android.Manifest
-import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
@@ -37,13 +36,14 @@ import java.util.UUID
 class MainActivity : ComponentActivity() {
 
     companion object {
-        private const val API    = "https://allinoneprotection.support446-ff6.workers.dev"
-        private const val ORIGIN = "https://allinoneprotection.support446-ff6.workers.dev"
+        private const val API =
+            "https://allinoneprotection.support446-ff6.workers.dev"
 
-        // ── রং ──────────────────────────────────────
-        private const val BG        = 0xFF0A0F1E.toInt()
-        private const val SURFACE   = 0xFF111827.toInt()
-        private const val SURFACE_2 = 0xFF1C2535.toInt()
-        private const val BORDER    = 0xFF2A3A52.toInt()
-        private const val BLUE      = 0xFF2563EB.toInt()
-        private const val BLUE_DIM  = 0xFF1D4ED8.toInt()
+        private const val ORIGIN =
+            "https://allinoneprotection.support446-ff6.workers.dev"
+
+        private const val BG = 0xFF080E1B.toInt()
+        private const val SURFACE = 0xFF111C2D.toInt()
+        private const val SURFACE_2 = 0xFF18263B.toInt()
+        private const val BLUE = 0xFF168BFF.toInt()
+        private const val CYAN = 0xFF24D5E8.toInt()
